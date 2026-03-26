@@ -1,110 +1,352 @@
+"""
+config.py
+=========
+Whole-Body PBPK configuration for mAb + TMDD (QSS approximation).
+
+Parameter input strategy
+────────────────────────
+  The QSS model requires KSS = (K_OFF + K_INT) / K_ON.
+
+  Rather than requiring per-drug kon/koff (often unavailable or unreliable),
+  we use a Kd-centric approach:
+
+    Global constant:
+      GENERIC_K_ON = 86.4 nM⁻¹ day⁻¹    (10⁶ /M/s; standard IgG assumption)
+
+    Per-drug input (minimum):
+      Kd (nM)          — equilibrium dissociation constant (widely available)
+      CL_0 (L/day)     — non-specific linear clearance
+      MW (Da)           — molecular weight
+
+    Per-target input:
+      K_DEG (day⁻¹)    — receptor degradation rate
+      K_INT (day⁻¹)    — internalization rate (default: GENERIC_K_INT = 43.2)
+
+    Auto-derived:
+      K_OFF = K_ON × Kd
+      KSS   = Kd + K_INT / K_ON
+
+  If drug-specific kon/koff ARE available, they override the generic K_ON.
+
+  Generic K_INT = 43.2 day⁻¹ (0.03/min) is the midpoint of the generic
+  membrane turnover range 0.02–0.05/min (Bhatt ch.4, 2008). This represents
+  constitutive receptor internalization via membrane recycling, independent
+  of specific receptor identity. Receptor-specific values (e.g. EGFR ~10 day⁻¹)
+  should be used when available.
+
+Dosing regimens
+───────────────
+  Available: 'q1w', 'q2w', 'q3w', 'q4w',
+             'loading_q1w', 'loading_q2w', 'loading_q3w',
+             'single', 'custom'
+
+References
+──────────
+  [Shah2012]   Shah & Betts, J PK/PD 2012;39:67-86
+  [Shah2013]   Shah & Betts, mAbs 2013;5:297-305
+  [Gibiansky]  Gibiansky et al., J PK/PD 2008;35:573    (QSS approximation)
+  [Grimm]      Grimm, J PK/PD 2009;36:407               (QSS for mAb TMDD)
+  [Mosteller]  Mosteller RD, NEJM 1987;317:1098
+  [Baxter]     Baxter et al., Cancer Res 1994;54:1517
+  [Li2019]     Li & Shah, J PK/PD 2019;46:305-318
+  [Wiley]      Wiley et al., J Cell Biol 1991;112:745
+  [Lammerts]   Lammerts van Bueren et al., Cancer Res 2008
+  [ICRP89]     ICRP Publication 89, 2002
+  [Brown]      Brown RP et al., Toxicol Sci 1997;36:359
+  [Lachman]    Lachman et al., JEM 2009; doi:10.1084/jem.20082481
+  [Bhatt]      Bhatt ch.4 in Bentham 2008; doi:10.1007/978-1-59745-356-1_4
+"""
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Global constants for IgG antibodies
+# ──────────────────────────────────────────────────────────────────────────
+
+# Generic association rate: 10^6 /M/s → 86.4 nM⁻¹ day⁻¹
+# Standard assumption for IgG; binding is typically much faster than
+# all other PK processes (pseudo steady-state).
+GENERIC_K_ON = 86.4    # nM⁻¹ day⁻¹
+
+# Generic internalization rate: 0.03/min → 43.2 day⁻¹
+# Midpoint of constitutive membrane turnover range 0.02–0.05/min.
+# Used when receptor-specific K_INT is unavailable.
+GENERIC_K_INT = 43.2   # day⁻¹
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Dosing regimen definitions
+# ──────────────────────────────────────────────────────────────────────────
+DOSING_REGIMENS = {
+    'q1w':         {'interval_days': 7,  'has_loading': False, 'description': 'Every 1 week'},
+    'q2w':         {'interval_days': 14, 'has_loading': False, 'description': 'Every 2 weeks'},
+    'q3w':         {'interval_days': 21, 'has_loading': False, 'description': 'Every 3 weeks'},
+    'q4w':         {'interval_days': 28, 'has_loading': False, 'description': 'Every 4 weeks'},
+    'loading_q1w': {'interval_days': 7,  'has_loading': True,  'description': 'Loading + weekly'},
+    'loading_q2w': {'interval_days': 14, 'has_loading': True,  'description': 'Loading + biweekly'},
+    'loading_q3w': {'interval_days': 21, 'has_loading': True,  'description': 'Loading + q3w'},
+    'single':      {'interval_days': None, 'has_loading': False, 'description': 'Single dose'},
+    'custom':      {'interval_days': None, 'has_loading': False, 'description': 'User-defined'},
+}
+
+
+def build_dosing_schedule(regimen_name, dose_mg_m2, sim_days=120,
+                          loading_dose_mg_m2=None, custom_schedule=None):
+    """Generate a dosing schedule from a named regimen."""
+    if regimen_name not in DOSING_REGIMENS:
+        available = ', '.join(sorted(DOSING_REGIMENS.keys()))
+        raise ValueError(
+            f"Unknown regimen '{regimen_name}'. Available: {available}"
+        )
+
+    regimen = DOSING_REGIMENS[regimen_name]
+
+    if regimen_name == 'custom':
+        if custom_schedule is None:
+            raise ValueError("regimen='custom' requires custom_schedule parameter.")
+        return sorted(custom_schedule, key=lambda x: x['time'])
+
+    if regimen_name == 'single':
+        return [{'time': 0, 'dose_mg_m2': dose_mg_m2}]
+
+    interval = regimen['interval_days']
+    schedule = []
+
+    if regimen['has_loading']:
+        ld = loading_dose_mg_m2 if loading_dose_mg_m2 is not None else dose_mg_m2 * 1.5
+        schedule.append({'time': 0, 'dose_mg_m2': ld})
+        t = interval
+    else:
+        schedule.append({'time': 0, 'dose_mg_m2': dose_mg_m2})
+        t = interval
+
+    while t < sim_days:
+        schedule.append({'time': t, 'dose_mg_m2': dose_mg_m2})
+        t += interval
+
+    return schedule
+
+
 class Config:
-    def __init__(self, drug_name="cetuximab", target_name="egfr", dose_override=None):
-        """
-        Initialize PBPK configuration.
-        Integrates standard literature-based parameters (Shah & Betts 2013, Grisic et al. 2020)
-        with a scalable multi-drug and multi-target architecture.
-        """
+    def __init__(self, drug_name="cetuximab", target_name="egfr",
+                 dose_override=None, regimen_override=None,
+                 loading_dose_mg_m2=None, custom_schedule=None,
+                 sim_days=120):
+
         self.drug_name = drug_name.lower()
         self.target_name = target_name.lower()
-        
-        # ---------------------------------------------------------
-        # [1] System PK (Standard Human 70kg)
-        # ---------------------------------------------------------
-        self.BSA = 1.9               # Body Surface Area (m^2)
-        self.V_CENTRAL = 3.7         # Plasma volume (L)
-        self.V_PERIPHERAL = 2.7      # Total accessible tissue volume (L)
 
-        # ---------------------------------------------------------
-        # [2] Target Specific Database (TARGET_DB)
-        # ---------------------------------------------------------
+        # ──────────────────────────────────────────────────────────────
+        # System physiology (71 kg reference human, [Shah2012] Table 4)
+        # ──────────────────────────────────────────────────────────────
+        self.BSA = 1.9
+        self.V_CENTRAL = 3.7
+        self.Q_TOTAL = 4365.0
+
+        # ──────────────────────────────────────────────────────────────
+        # Target database
+        #   K_DEG (day⁻¹) : receptor degradation rate
+        #   K_INT (day⁻¹) : internalization rate of drug-receptor complex
+        #                    Uses GENERIC_K_INT as fallback if not specified.
+        #
+        #   EGFR K_INT = 10.0 day⁻¹ (t½ ≈ 1.7 h)
+        #     [Wiley] k_int 0.1–0.5 h⁻¹ → 2.4–12 day⁻¹
+        #     [Lammerts] Cetuximab-EGFR t½_int ≈ 1–2 h → 8–17 day⁻¹
+        # ──────────────────────────────────────────────────────────────
         TARGET_DB = {
-            'egfr': {
-                'K_DEG': 1.0,         # EGFR turnover rate (day^-1)
-            },
-            'erbb2': {                # HER2 data prep
-                'K_DEG': 0.25,        # Example ERBB2 turnover rate
-            },
-            'cd36': {
-                'K_DEG': 3.47,         
-            }
+            'egfr':  {'K_DEG': 1.0,  'K_INT': 10.0},
+            'erbb2': {'K_DEG': 0.25, 'K_INT': 10.0},
+            'cd36':  {'K_DEG': 3.47},                    # K_INT → generic
+            'ccl2':  {'K_DEG': 20.112, 'K_INT': 0.2544},
         }
-
-        # Validate target selection
         if self.target_name not in TARGET_DB:
-            print(f"[!] Warning: Target '{self.target_name}' not found in TARGET_DB. Defaulting to 'egfr'.")
+            print(f"[!] Target '{self.target_name}' not found — defaulting to 'egfr'.")
             self.target_name = 'egfr'
 
-        # Map Target Parameters
-        target_params = TARGET_DB[self.target_name]
-        self.K_DEG = target_params['K_DEG']
+        target = TARGET_DB[self.target_name]
+        self.K_DEG = target['K_DEG']
+        self.K_INT = target.get('K_INT', GENERIC_K_INT)
 
-        # ---------------------------------------------------------
-        # [3] Standard Antibody Biodistribution Coefficients (ABC / Kp)
-        # Reference: Shah & Betts (2013)
-        # ---------------------------------------------------------
+        # ──────────────────────────────────────────────────────────────
+        # Tissue physiological parameters
+        # ──────────────────────────────────────────────────────────────
         self.TISSUE_SPECS = {
-            'Skin':   {'V_total': 10.0, 'f_v': 0.02, 'f_isf': 0.30, 'Kp': 0.157, 'PS': 0.001, 'f_q': 0.05},
-            'Liver':  {'V_total': 1.82, 'f_v': 0.14, 'f_isf': 0.16, 'Kp': 0.121, 'PS': 0.050, 'f_q': 0.25}, 
-            'Lung':   {'V_total': 0.53, 'f_v': 0.36, 'f_isf': 0.15, 'Kp': 0.149, 'PS': 0.020, 'f_q': 1.00}, 
-            'Kidney': {'V_total': 0.31, 'f_v': 0.16, 'f_isf': 0.10, 'Kp': 0.137, 'PS': 0.020, 'f_q': 0.19},
-            'Brain':  {'V_total': 1.45, 'f_v': 0.03, 'f_isf': 0.15, 'Kp': 0.00351, 'PS': 0.00001, 'f_q': 0.12}, 
-            'Heart':  {'V_total': 0.33, 'f_v': 0.01, 'f_isf': 0.10, 'Kp': 0.100, 'PS': 0.010, 'f_q': 0.04},
-            'Default':{'V_total': 2.00, 'f_v': 0.05, 'f_isf': 0.20, 'Kp': 0.100, 'PS': 0.005, 'f_q': 0.05}
+            'Skin': {
+                'V_total': 3.408, 'f_v': 0.068, 'f_isf': 0.330,
+                'f_q': 0.064, 'Kp': 0.157, 'PS': 0.001,
+                'sigma': 0.95, 'L_lymph': 4365.0 * 0.064 * 0.002,
+            },
+            'Liver': {
+                'V_total': 2.143, 'f_v': 0.155, 'f_isf': 0.200,
+                'f_q': 0.073, 'Kp': 0.121, 'PS': 0.050,
+                'sigma': 0.85,
+                'L_lymph': 4365.0 * 0.073 * 0.002,
+            },
+            'Lung': {
+                'V_total': 1.000, 'f_v': 0.100, 'f_isf': 0.300,
+                'f_q': 1.000, 'Kp': 0.149, 'PS': 0.020,
+                'sigma': 0.95, 'L_lymph': 4365.0 * 1.000 * 0.002,
+            },
+            'Kidney': {
+                'V_total': 0.332, 'f_v': 0.100, 'f_isf': 0.150,
+                'f_q': 0.200, 'Kp': 0.137, 'PS': 0.020,
+                'sigma': 0.85,
+                'L_lymph': 4365.0 * 0.200 * 0.002,
+            },
+            'Brain': {
+                'V_total': 1.450, 'f_v': 0.040, 'f_isf': 0.180,
+                'f_q': 0.118, 'Kp': 0.00351, 'PS': 0.00001,
+                'sigma': 0.99,
+                'L_lymph': 4365.0 * 0.118 * 0.0002,
+            },
+            'Heart': {
+                'V_total': 0.341, 'f_v': 0.070, 'f_isf': 0.143,
+                'f_q': 0.043, 'Kp': 0.102, 'PS': 0.010,
+                'sigma': 0.95, 'L_lymph': 4365.0 * 0.043 * 0.002,
+            },
+            'Breast': {
+                'V_total': 0.500, 'f_v': 0.030, 'f_isf': 0.200,
+                'f_q': 0.006, 'Kp': 0.120, 'PS': 0.001,
+                'sigma': 0.95, 'L_lymph': 4365.0 * 0.006 * 0.002,
+            },
+            'Plasma': {
+                'V_total': 3.126, 'f_v': 1.000, 'f_isf': 0.000,
+                'f_q': 1.000, 'Kp': 1.000, 'PS': 0.000,
+                'sigma': 0.00, 'L_lymph': 0.000,
+            },
+            # Blood cells (intravascular compartment).
+            # Handled separately in simulator.py via blood_data / Ctot_central
+            # formulation — NOT entered into the solid organ ODE loop.
+            # This entry exists only to pass _validate_input's tissue coverage
+            # check. f_isf=0 and f_q=0 signal it is not a solid organ.
+            'Blood': {
+                'V_total': 1.574, 'f_v': 1.000, 'f_isf': 0.000,
+                'f_q': 0.000,    'Kp': 1.000,  'PS': 0.000,
+                'sigma': 0.00,   'L_lymph': 0.000,
+            },
         }
-        # ---------------------------------------------------------
-        # [4] Drug Specific Database (DRUG_DB)
-        # ---------------------------------------------------------
+
+        # ──────────────────────────────────────────────────────────────
+        # Drug database — Kd-centric
+        #
+        #   Required per drug:
+        #     Kd (nM)       : equilibrium dissociation constant
+        #     CL_0 (L/day)  : non-specific linear clearance
+        #     MW (Da)        : molecular weight
+        #     DOSE_MG_M2    : maintenance dose
+        #     regimen       : default dosing regimen key
+        #
+        #   Optional:
+        #     K_ON (nM⁻¹ day⁻¹) : overrides GENERIC_K_ON if provided
+        #     LOADING_DOSE_MG_M2 : for loading regimens
+        # ──────────────────────────────────────────────────────────────
         DRUG_DB = {
             'cetuximab': {
-                'DOSE_MG_M2': 250.0,     # Standard clinical dose
-                'MW': 145781.6,          # Molecular weight (g/mol)
-                'K_ON': 0.112,           # nM^-1 * day^-1
-                'K_OFF': 0.0168,         # day^-1
-                'K_INT': 0.95,           # day^-1
-                'CL_0': 0.42,            # Non-specific clearance (L/day)
-                'Q': 0.88                # Inter-compartmental clearance (L/day)
+                'Kd': 0.40,               # nM (SPR; Zhuang et al. Nat Commun 2022)
+                'CL_0': 0.42,
+                'MW': 145781.6,
+                'DOSE_MG_M2': 250.0,
+                'LOADING_DOSE_MG_M2': 400.0,
+                'regimen': 'loading_q1w',
             },
-            'panitumumab': {             # Scalable for future comparisons
-                'DOSE_MG_M2': 221.0,     # Corrected dose for 70kg/1.9m2 BSA
-                'MW': 147000.0,
-                'K_ON': 0.120,
-                'K_OFF': 0.0150,
-                'K_INT': 0.90,
+            'panitumumab': {
+                'Kd': 0.05,               # nM (FDA label / literature)
                 'CL_0': 0.40,
-                'Q': 0.85
+                'MW': 147000.0,
+                'DOSE_MG_M2': 221.0,
+                'regimen': 'q2w',
             },
             'plt012': {
-                'DOSE_MG_M2': 400.0,
-                'MW': 150000.0,
-                'K_ON': 0.150,          # Standard high-affinity mAb
-                'K_OFF': 0.015,         # K_D = 0.1 nM
-                'K_INT': 1.4,           # Complex internalization (t1/2 ~ 12h)
+                'Kd': 0.10,
                 'CL_0': 0.35,
-                'Q': 0.90
+                'MW': 150000.0,
+                'DOSE_MG_M2': 400.0,
+                'regimen': 'q3w',
+            },
+            'carlumab': {
+                'Kd': 2.40,
+                'CL_0': 1.08,
+                'MW': 150000.0,
+                'DOSE_MG_M2': 550.0,
+                'regimen': 'q4w',
+            },
+            # ── Generic IgG1 pseudo-antibody for target screening ─────
+            #   Kd   : 1.0 nM (assumed; override to match actual target)
+            #   CL_0 : 0.181 L/day [Lachman et al. JEM 2009]
+            #   MW   : 150 kDa (standard IgG1)
+            #   Dose : ~10 mg/kg equivalent (400 mg/m²)
+            'generic_igg1': {
+                'Kd': 1.0,
+                'CL_0': 0.181,
+                'MW': 150000.0,
+                'DOSE_MG_M2': 400.0,
+                'regimen': 'q3w',
             },
         }
 
-        # Validate drug selection
         if self.drug_name not in DRUG_DB:
-            print(f"[!] Warning: Drug '{self.drug_name}' not found in DRUG_DB. Defaulting to 'cetuximab'.")
+            print(f"[!] Drug '{self.drug_name}' not found — defaulting to 'cetuximab'.")
             self.drug_name = 'cetuximab'
-            
-        # Map Drug Parameters
-        drug_params = DRUG_DB[self.drug_name]
-        self.DOSE_MG_M2 = drug_params['DOSE_MG_M2']
-        self.MW = drug_params['MW']
-        self.K_ON = drug_params['K_ON']
-        self.K_OFF = drug_params['K_OFF']
-        self.K_INT = drug_params['K_INT']
-        self.CL_0 = drug_params['CL_0']
-        self.Q = drug_params['Q']
-        
-        # ---------------------------------------------------------
-        # [5] Apply Custom Dose Override (From Terminal Parser)
-        # ---------------------------------------------------------
+
+        dp = DRUG_DB[self.drug_name]
+
+        # Core PK parameters
+        self.DOSE_MG_M2 = dp['DOSE_MG_M2']
+        self.MW = dp['MW']
+        self.CL_0 = dp['CL_0']
+        self.Kd = dp['Kd']
+
+        # K_ON: use drug-specific if provided, else global generic
+        self.K_ON = dp.get('K_ON', GENERIC_K_ON)
+
+        # Derived binding constants
+        self.K_OFF = self.K_ON * self.Kd
+        self.KSS = self.Kd + self.K_INT / self.K_ON
+
+        # Dose override
         if dose_override is not None:
-            print(f"[*] Overriding default dose ({self.DOSE_MG_M2} mg/m2) with user input: {dose_override} mg/m2")
+            print(f"[*] Dose override: {self.DOSE_MG_M2} → {dose_override} mg/m²")
             self.DOSE_MG_M2 = float(dose_override)
-            
-        print(f"[*] Config loaded | Drug: {self.drug_name.capitalize()} | Target: {self.target_name.upper()} | Final Dose: {self.DOSE_MG_M2} mg/m2")
+
+        # Resolve dosing regimen
+        regimen_name = regimen_override if regimen_override else dp['regimen']
+        ld = loading_dose_mg_m2 or dp.get('LOADING_DOSE_MG_M2')
+
+        self.DOSING_SCHEDULE = build_dosing_schedule(
+            regimen_name=regimen_name,
+            dose_mg_m2=self.DOSE_MG_M2,
+            sim_days=sim_days,
+            loading_dose_mg_m2=ld,
+            custom_schedule=custom_schedule,
+        )
+        self.regimen = regimen_name
+
+        # ── Summary ───────────────────────────────────────────────────
+        print(f"\n[*] Config loaded (QSS mode)")
+        print(f"    Drug    : {self.drug_name.capitalize()}")
+        print(f"    Target  : {self.target_name.upper()}")
+        print(f"    Kd      : {self.Kd:.4f} nM")
+        k_on_src = "drug-specific" if 'K_ON' in dp else "generic"
+        print(f"    K_ON    : {self.K_ON} nM⁻¹ day⁻¹  ({k_on_src})")
+        print(f"    K_OFF   : {self.K_OFF:.4f} day⁻¹  (= K_ON × Kd)")
+        k_int_src = "target-specific" if 'K_INT' in target else "generic"
+        print(f"    K_INT   : {self.K_INT} day⁻¹  ({k_int_src}, "
+              f"t½_int = {0.693 / self.K_INT * 24:.1f} h)")
+        print(f"    K_DEG   : {self.K_DEG} day⁻¹")
+        print(f"    KSS     : {self.KSS:.4f} nM  "
+              f"(= Kd + K_INT/K_ON = {self.Kd:.4f} + "
+              f"{self.K_INT / self.K_ON:.4f})")
+        kss_kd_ratio = self.KSS / self.Kd if self.Kd > 0 else float('inf')
+        print(f"    KSS/Kd  : {kss_kd_ratio:.2f}  "
+              f"({'K_INT shifts effective affinity' if kss_kd_ratio > 1.5 else 'K_INT negligible, KSS ≈ Kd'})")
+        print(f"    CL_0    : {self.CL_0} L/day")
+        regimen_desc = DOSING_REGIMENS[regimen_name]['description']
+        print(f"    Regimen : {regimen_name} — {regimen_desc}")
+        print(f"    Doses   : {len(self.DOSING_SCHEDULE)} over {sim_days} days")
+        if self.DOSING_SCHEDULE:
+            first = self.DOSING_SCHEDULE[0]
+            last = self.DOSING_SCHEDULE[-1]
+            print(f"    First   : day {first['time']}, "
+                  f"{first['dose_mg_m2']} mg/m²")
+            if len(self.DOSING_SCHEDULE) > 1:
+                print(f"    Last    : day {last['time']}, "
+                      f"{last['dose_mg_m2']} mg/m²")
