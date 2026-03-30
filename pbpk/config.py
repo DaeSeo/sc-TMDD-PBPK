@@ -3,58 +3,49 @@ config.py
 =========
 Whole-Body PBPK configuration for mAb + TMDD (QSS approximation).
 
+Simplified parallel-organ architecture for single-cell TMDD de-risking.
+
 Parameter input strategy
 ────────────────────────
-  The QSS model requires KSS = (K_OFF + K_INT) / K_ON.
+  QSS model: KSS = (K_OFF + K_INT) / K_ON.
 
-  Rather than requiring per-drug kon/koff (often unavailable or unreliable),
-  we use a Kd-centric approach:
-
-    Global constant:
-      GENERIC_K_ON = 86.4 nM⁻¹ day⁻¹    (10⁶ /M/s; standard IgG assumption)
-
-    Per-drug input (minimum):
-      Kd (nM)          — equilibrium dissociation constant (widely available)
-      CL_0 (L/day)     — non-specific linear clearance
-      MW (Da)           — molecular weight
-
-    Per-target input:
-      K_DEG (day⁻¹)    — receptor degradation rate
-      K_INT (day⁻¹)    — internalization rate (default: GENERIC_K_INT = 43.2)
-
-    Auto-derived:
-      K_OFF = K_ON × Kd
-      KSS   = Kd + K_INT / K_ON
-
-  If drug-specific kon/koff ARE available, they override the generic K_ON.
-
-  Generic K_INT = 43.2 day⁻¹ (0.03/min) is the midpoint of the generic
-  membrane turnover range 0.02–0.05/min (Bhatt ch.4, 2008). This represents
-  constitutive receptor internalization via membrane recycling, independent
-  of specific receptor identity. Receptor-specific values (e.g. EGFR ~10 day⁻¹)
-  should be used when available.
+  Kd-centric approach (avoids requiring per-drug kon/koff):
+    Global constant : GENERIC_K_ON = 86.4 nM⁻¹ day⁻¹  (10⁶ /M/s; IgG)
+    Per-drug input  : Kd (nM), CL_0 (L/day), MW (Da)
+    Per-target input: K_DEG (day⁻¹), K_INT (day⁻¹)
+    Auto-derived    : K_OFF = K_ON × Kd,  KSS = Kd + K_INT / K_ON
 
 Dosing regimens
 ───────────────
-  Available: 'q1w', 'q2w', 'q3w', 'q4w',
-             'loading_q1w', 'loading_q2w', 'loading_q3w',
-             'single', 'custom'
+  'q1w', 'q2w', 'q3w', 'q4w',
+  'loading_q1w', 'loading_q2w', 'loading_q3w',
+  'single', 'custom'
+
+Organ architecture
+──────────────────
+  All organs are arranged in PARALLEL to the central (plasma) compartment.
+  Lung receives only bronchial arterial flow (f_q ≈ 0.025), NOT total
+  cardiac output — the full serial pulmonary circuit is omitted for
+  simplicity, consistent with the minimal mAb PBPK approach of Li & Shah
+  (2019) and Cao & Bhatta (2020).
+
+  A lumped "Rest" compartment captures muscle, gut, adipose, spleen, bone,
+  and remaining soft tissue to ensure correct total volume of distribution.
 
 References
 ──────────
   [Shah2012]   Shah & Betts, J PK/PD 2012;39:67-86
   [Shah2013]   Shah & Betts, mAbs 2013;5:297-305
-  [Gibiansky]  Gibiansky et al., J PK/PD 2008;35:573    (QSS approximation)
-  [Grimm]      Grimm, J PK/PD 2009;36:407               (QSS for mAb TMDD)
-  [Mosteller]  Mosteller RD, NEJM 1987;317:1098
+  [Gibiansky]  Gibiansky et al., J PK/PD 2008;35:573
+  [Grimm]      Grimm, J PK/PD 2009;36:407
   [Baxter]     Baxter et al., Cancer Res 1994;54:1517
   [Li2019]     Li & Shah, J PK/PD 2019;46:305-318
+  [Cao2020]    Cao & Bhatta, J Pharmacokinet Pharmacodyn 2020;47:295
   [Wiley]      Wiley et al., J Cell Biol 1991;112:745
   [Lammerts]   Lammerts van Bueren et al., Cancer Res 2008
   [ICRP89]     ICRP Publication 89, 2002
   [Brown]      Brown RP et al., Toxicol Sci 1997;36:359
-  [Lachman]    Lachman et al., JEM 2009; doi:10.1084/jem.20082481
-  [Bhatt]      Bhatt ch.4 in Bentham 2008; doi:10.1007/978-1-59745-356-1_4
+  [Bhatt]      Bhatt ch.4 in Bentham 2008
 """
 
 
@@ -62,20 +53,14 @@ References
 # Global constants for IgG antibodies
 # ──────────────────────────────────────────────────────────────────────────
 
-# Generic association rate: 10^6 /M/s → 86.4 nM⁻¹ day⁻¹
-# Standard assumption for IgG; binding is typically much faster than
-# all other PK processes (pseudo steady-state).
-GENERIC_K_ON = 86.4    # nM⁻¹ day⁻¹
-
-# Generic internalization rate: 0.03/min → 43.2 day⁻¹
-# Midpoint of constitutive membrane turnover range 0.02–0.05/min.
-# Used when receptor-specific K_INT is unavailable.
-GENERIC_K_INT = 43.2   # day⁻¹
+GENERIC_K_ON  = 86.4    # nM⁻¹ day⁻¹  (10⁶ /M/s; standard IgG assumption)
+GENERIC_K_INT = 43.2    # day⁻¹        (0.03/min; constitutive membrane turnover)
 
 
 # ──────────────────────────────────────────────────────────────────────────
 # Dosing regimen definitions
 # ──────────────────────────────────────────────────────────────────────────
+
 DOSING_REGIMENS = {
     'q1w':         {'interval_days': 7,  'has_loading': False, 'description': 'Every 1 week'},
     'q2w':         {'interval_days': 14, 'has_loading': False, 'description': 'Every 2 weeks'},
@@ -132,31 +117,30 @@ class Config:
                  loading_dose_mg_m2=None, custom_schedule=None,
                  sim_days=120):
 
-        self.drug_name = drug_name.lower()
+        self.drug_name   = drug_name.lower()
         self.target_name = target_name.lower()
 
         # ──────────────────────────────────────────────────────────────
         # System physiology (71 kg reference human, [Shah2012] Table 4)
         # ──────────────────────────────────────────────────────────────
-        self.BSA = 1.9
-        self.V_CENTRAL = 3.7
-        self.Q_TOTAL = 4365.0
+        self.BSA       = 1.9       # m²  (Mosteller formula, 71 kg / 170 cm)
+        self.V_CENTRAL = 3.7       # L   (≈ V_plasma + lymph; Shah2012)
+        self.Q_TOTAL   = 4365.0    # L/day (cardiac output)
 
         # ──────────────────────────────────────────────────────────────
         # Target database
-        #   K_DEG (day⁻¹) : receptor degradation rate
-        #   K_INT (day⁻¹) : internalization rate of drug-receptor complex
-        #                    Uses GENERIC_K_INT as fallback if not specified.
+        #   K_DEG (day⁻¹)     : free receptor degradation rate
+        #   K_INT (day⁻¹)     : drug-receptor complex internalization rate
+        #   soluble (bool)    : True for soluble targets (affects lymph drain)
         #
-        #   EGFR K_INT = 10.0 day⁻¹ (t½ ≈ 1.7 h)
-        #     [Wiley] k_int 0.1–0.5 h⁻¹ → 2.4–12 day⁻¹
-        #     [Lammerts] Cetuximab-EGFR t½_int ≈ 1–2 h → 8–17 day⁻¹
+        #   Membrane targets: drug-RC is anchored; only free drug drains via lymph.
+        #   Soluble targets : drug-RC is free in ISF; total drug drains via lymph.
         # ──────────────────────────────────────────────────────────────
         TARGET_DB = {
-            'egfr':  {'K_DEG': 1.0,  'K_INT': 10.0},
-            'erbb2': {'K_DEG': 0.25, 'K_INT': 10.0},
-            'cd36':  {'K_DEG': 3.47},                    # K_INT → generic
-            'ccl2':  {'K_DEG': 20.112, 'K_INT': 0.2544},
+            'egfr':  {'K_DEG': 1.0,    'K_INT': 10.0,   'soluble': False},
+            'erbb2': {'K_DEG': 0.25,   'K_INT': 10.0,   'soluble': False},
+            'cd36':  {'K_DEG': 3.47,                     'soluble': False},
+            'ccl2':  {'K_DEG': 20.112, 'K_INT': 0.2544, 'soluble': True},
         }
         if self.target_name not in TARGET_DB:
             print(f"[!] Target '{self.target_name}' not found — defaulting to 'egfr'.")
@@ -165,9 +149,24 @@ class Config:
         target = TARGET_DB[self.target_name]
         self.K_DEG = target['K_DEG']
         self.K_INT = target.get('K_INT', GENERIC_K_INT)
+        self.soluble_target = target.get('soluble', False)
 
         # ──────────────────────────────────────────────────────────────
         # Tissue physiological parameters
+        #
+        # Architecture: all organs PARALLEL to central compartment.
+        #
+        # IMPORTANT — Lung f_q:
+        #   In a full serial PBPK, lung receives 100% of cardiac output
+        #   (venous → lung → arterial → organs). In this simplified
+        #   parallel model, lung f_q represents only bronchial arterial
+        #   flow (~2.5% of CO). This avoids exceeding total CO while
+        #   keeping the architecture simple.  [Li2019, Cao2020]
+        #
+        # f_q constraint: Σ f_q across all organs = 1.0 (mass balance).
+        #
+        # [Shah2012] Table 3-4; [Brown] for blood flows; [ICRP89] for
+        # tissue volumes.
         # ──────────────────────────────────────────────────────────────
         self.TISSUE_SPECS = {
             'Skin': {
@@ -178,25 +177,24 @@ class Config:
             'Liver': {
                 'V_total': 2.143, 'f_v': 0.155, 'f_isf': 0.200,
                 'f_q': 0.073, 'Kp': 0.121, 'PS': 0.050,
-                'sigma': 0.85,
-                'L_lymph': 4365.0 * 0.073 * 0.002,
+                'sigma': 0.85, 'L_lymph': 4365.0 * 0.073 * 0.002,
             },
             'Lung': {
+                # Bronchial arterial flow only (parallel model).
+                # Full pulmonary transit is implicit in the central pool.
                 'V_total': 1.000, 'f_v': 0.100, 'f_isf': 0.300,
-                'f_q': 1.000, 'Kp': 0.149, 'PS': 0.020,
-                'sigma': 0.95, 'L_lymph': 4365.0 * 1.000 * 0.002,
+                'f_q': 0.025, 'Kp': 0.149, 'PS': 0.020,
+                'sigma': 0.95, 'L_lymph': 4365.0 * 0.025 * 0.002,
             },
             'Kidney': {
                 'V_total': 0.332, 'f_v': 0.100, 'f_isf': 0.150,
                 'f_q': 0.200, 'Kp': 0.137, 'PS': 0.020,
-                'sigma': 0.85,
-                'L_lymph': 4365.0 * 0.200 * 0.002,
+                'sigma': 0.85, 'L_lymph': 4365.0 * 0.200 * 0.002,
             },
             'Brain': {
                 'V_total': 1.450, 'f_v': 0.040, 'f_isf': 0.180,
                 'f_q': 0.118, 'Kp': 0.00351, 'PS': 0.00001,
-                'sigma': 0.99,
-                'L_lymph': 4365.0 * 0.118 * 0.0002,
+                'sigma': 0.99, 'L_lymph': 4365.0 * 0.118 * 0.0002,
             },
             'Heart': {
                 'V_total': 0.341, 'f_v': 0.070, 'f_isf': 0.143,
@@ -208,40 +206,45 @@ class Config:
                 'f_q': 0.006, 'Kp': 0.120, 'PS': 0.001,
                 'sigma': 0.95, 'L_lymph': 4365.0 * 0.006 * 0.002,
             },
+            # ── Lumped "Rest of Body" ──────────────────────────────────
+            # Aggregates: muscle (~28 L), gut (~1.2 L), spleen (~0.19 L),
+            # adipose (~10 L), bone marrow (~1 L), other soft tissue.
+            # V_total and f_q derived by subtraction from whole-body totals
+            # to enforce mass balance.  [Shah2012, Brown, ICRP89]
+            #
+            # f_q = 1.0 − Σ(other organ f_q) = 0.471
+            # Two-Pore parameters: muscle-like (σ=0.95, moderate PS).
+            'Rest': {
+                'V_total': 35.0, 'f_v': 0.050, 'f_isf': 0.150,
+                'f_q': 0.471, 'Kp': 0.150, 'PS': 0.005,
+                'sigma': 0.95, 'L_lymph': 4365.0 * 0.471 * 0.002,
+            },
+            # ── Bookkeeping entries (not in solid organ ODE loop) ──────
             'Plasma': {
                 'V_total': 3.126, 'f_v': 1.000, 'f_isf': 0.000,
                 'f_q': 1.000, 'Kp': 1.000, 'PS': 0.000,
                 'sigma': 0.00, 'L_lymph': 0.000,
             },
-            # Blood cells (intravascular compartment).
-            # Handled separately in simulator.py via blood_data / Ctot_central
-            # formulation — NOT entered into the solid organ ODE loop.
-            # This entry exists only to pass _validate_input's tissue coverage
-            # check. f_isf=0 and f_q=0 signal it is not a solid organ.
             'Blood': {
                 'V_total': 1.574, 'f_v': 1.000, 'f_isf': 0.000,
-                'f_q': 0.000,    'Kp': 1.000,  'PS': 0.000,
-                'sigma': 0.00,   'L_lymph': 0.000,
+                'f_q': 0.000, 'Kp': 1.000, 'PS': 0.000,
+                'sigma': 0.00, 'L_lymph': 0.000,
             },
         }
 
+        # Validate f_q sums to ~1.0 (excluding Plasma and Blood bookkeeping)
+        _solid_specs = {k: v for k, v in self.TISSUE_SPECS.items()
+                        if k.lower() not in ('plasma', 'blood')}
+        _fq_sum = sum(v['f_q'] for v in _solid_specs.values())
+        if abs(_fq_sum - 1.0) > 0.01:
+            print(f"[WARNING] Σ f_q = {_fq_sum:.4f} ≠ 1.0 — check TISSUE_SPECS.")
+
         # ──────────────────────────────────────────────────────────────
         # Drug database — Kd-centric
-        #
-        #   Required per drug:
-        #     Kd (nM)       : equilibrium dissociation constant
-        #     CL_0 (L/day)  : non-specific linear clearance
-        #     MW (Da)        : molecular weight
-        #     DOSE_MG_M2    : maintenance dose
-        #     regimen       : default dosing regimen key
-        #
-        #   Optional:
-        #     K_ON (nM⁻¹ day⁻¹) : overrides GENERIC_K_ON if provided
-        #     LOADING_DOSE_MG_M2 : for loading regimens
         # ──────────────────────────────────────────────────────────────
         DRUG_DB = {
             'cetuximab': {
-                'Kd': 0.40,               # nM (SPR; Zhuang et al. Nat Commun 2022)
+                'Kd': 0.40,
                 'CL_0': 0.42,
                 'MW': 145781.6,
                 'DOSE_MG_M2': 250.0,
@@ -249,7 +252,7 @@ class Config:
                 'regimen': 'loading_q1w',
             },
             'panitumumab': {
-                'Kd': 0.05,               # nM (FDA label / literature)
+                'Kd': 0.05,
                 'CL_0': 0.40,
                 'MW': 147000.0,
                 'DOSE_MG_M2': 221.0,
@@ -269,11 +272,6 @@ class Config:
                 'DOSE_MG_M2': 550.0,
                 'regimen': 'q4w',
             },
-            # ── Generic IgG1 pseudo-antibody for target screening ─────
-            #   Kd   : 1.0 nM (assumed; override to match actual target)
-            #   CL_0 : 0.181 L/day [Lachman et al. JEM 2009]
-            #   MW   : 150 kDa (standard IgG1)
-            #   Dose : ~10 mg/kg equivalent (400 mg/m²)
             'generic_igg1': {
                 'Kd': 1.0,
                 'CL_0': 0.181,
@@ -291,16 +289,16 @@ class Config:
 
         # Core PK parameters
         self.DOSE_MG_M2 = dp['DOSE_MG_M2']
-        self.MW = dp['MW']
-        self.CL_0 = dp['CL_0']
-        self.Kd = dp['Kd']
+        self.MW         = dp['MW']
+        self.CL_0       = dp['CL_0']
+        self.Kd         = dp['Kd']
 
-        # K_ON: use drug-specific if provided, else global generic
+        # K_ON: drug-specific if available, else generic
         self.K_ON = dp.get('K_ON', GENERIC_K_ON)
 
         # Derived binding constants
         self.K_OFF = self.K_ON * self.Kd
-        self.KSS = self.Kd + self.K_INT / self.K_ON
+        self.KSS   = self.Kd + self.K_INT / self.K_ON
 
         # Dose override
         if dose_override is not None:
@@ -323,7 +321,8 @@ class Config:
         # ── Summary ───────────────────────────────────────────────────
         print(f"\n[*] Config loaded (QSS mode)")
         print(f"    Drug    : {self.drug_name.capitalize()}")
-        print(f"    Target  : {self.target_name.upper()}")
+        print(f"    Target  : {self.target_name.upper()}"
+              f"  ({'soluble' if self.soluble_target else 'membrane-bound'})")
         print(f"    Kd      : {self.Kd:.4f} nM")
         k_on_src = "drug-specific" if 'K_ON' in dp else "generic"
         print(f"    K_ON    : {self.K_ON} nM⁻¹ day⁻¹  ({k_on_src})")
@@ -342,9 +341,10 @@ class Config:
         regimen_desc = DOSING_REGIMENS[regimen_name]['description']
         print(f"    Regimen : {regimen_name} — {regimen_desc}")
         print(f"    Doses   : {len(self.DOSING_SCHEDULE)} over {sim_days} days")
+        print(f"    Σ f_q   : {_fq_sum:.4f}  (should be 1.0)")
         if self.DOSING_SCHEDULE:
             first = self.DOSING_SCHEDULE[0]
-            last = self.DOSING_SCHEDULE[-1]
+            last  = self.DOSING_SCHEDULE[-1]
             print(f"    First   : day {first['time']}, "
                   f"{first['dose_mg_m2']} mg/m²")
             if len(self.DOSING_SCHEDULE) > 1:

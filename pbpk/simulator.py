@@ -3,24 +3,19 @@ simulator.py
 ============
 PBPKSimulator — builds the ODE system, integrates it, and unpacks results.
 
-Architecture (mirrors equations.py principles)
-───────────────────────────────────────────────
-  Peripheral compartments (solid organs — Two-Pore PBPK):
-    Brain, Heart, Kidney, Liver, Lung, Skin
+Architecture
+────────────
+  Peripheral compartments (solid organs — Two-Pore, parallel):
+    Brain, Heart, Kidney, Liver, Lung, Skin, Breast, Rest
     State per organ: [Cv, Ctot_isf, Rtot_1, …, Rtot_n]
 
   Central compartment (blood / PBMC — intravascular TMDD):
-    Blood cells encounter plasma drug directly — no ISF barrier.
     y[0] = Ctot_central = Cc_free + RC_blood_eff × (V_blood/V_CENTRAL)
-    Cc_free is recovered at every step via the Gibiansky quadratic.
-    State for blood: [Rtot_blood_1, …, Rtot_blood_n]
 
 Two simulation modes
 ────────────────────
-  run_single_cell() : Bayesian-inferred per-cell-type nM (nM_concentration)
-  run_bulk()        : tissue-average bulk nM (bulk_nM_concentration)
-
-Both produce identical-format DataFrames for direct comparison.
+  run_single_cell() : Bayesian-inferred per-cell-type nM
+  run_bulk()        : tissue-average bulk nM
 """
 
 import os
@@ -30,13 +25,10 @@ from scipy.integrate import solve_ivp
 
 from pbpk.equations import pbpk_qss_ode, _recover_free_drug_vec
 
-# plasma: belongs to central compartment → excluded from solid organ loop
-# blood:  handled separately as blood_data → also excluded from solid organ loop
 EXCLUDED_TISSUES = {'plasma', 'blood'}
 
 # Total blood cell volume (erythrocytes + leukocytes, excluding plasma).
 # Shah & Betts (2012) Table 4: V_whole_blood ≈ 4.7 L, V_plasma ≈ 3.126 L
-# → V_blood_cells = 4.7 − 3.126 = 1.574 L
 V_BLOOD_CELLS = 1.574  # L
 
 
@@ -63,12 +55,12 @@ class PBPKSimulator:
     # ─────────────────────────────────────────────────────────────────────
 
     def _validate_input(self):
-        """Check required columns, tissue coverage, and nM sanity."""
+        """Check required columns, tissue coverage, f_q mass balance, and nM sanity."""
         cfg = self.config
         df  = self.df
 
         REQUIRED = ['tissue', 'cell_type', 'nM_concentration',
-                    'bulk_nM_concentration', 'volume_fraction', 'cells']
+                     'bulk_nM_concentration', 'volume_fraction', 'cells']
         missing_cols = [c for c in REQUIRED if c not in df.columns]
         if missing_cols:
             raise ValueError(
@@ -77,7 +69,7 @@ class PBPKSimulator:
             )
         print("\n[✓] All required columns present.")
 
-        # plasma fully excluded; blood has a TISSUE_SPECS entry for bookkeeping
+        # Tissue coverage check
         SPEC_EXCLUDED = {'plasma'}
         tissues_in_data = {str(t).lower() for t in df['tissue'].unique()} - SPEC_EXCLUDED
         tissues_in_spec = {str(t).lower() for t in cfg.TISSUE_SPECS.keys()} - SPEC_EXCLUDED
@@ -89,9 +81,18 @@ class PBPKSimulator:
             )
         print("[✓] All tissues have TISSUE_SPECS entries.")
 
-        # nM summary (plasma excluded; blood labelled [intravascular])
+        # f_q mass balance check
+        solid_specs = {k: v for k, v in cfg.TISSUE_SPECS.items()
+                       if k.lower() not in ('plasma', 'blood')}
+        fq_sum = sum(v['f_q'] for v in solid_specs.values())
+        if abs(fq_sum - 1.0) > 0.01:
+            print(f"[WARNING] Σ f_q = {fq_sum:.4f} ≠ 1.0 — blood flow mass balance violated.")
+        else:
+            print(f"[✓] Σ f_q = {fq_sum:.4f} (mass balance OK)")
+
+        # nM summary
         SHOW = {str(t).lower() for t in df['tissue'].unique()} - {'plasma'}
-        print("\n[*] nM concentration summary (single-cell):")
+        print(f"\n[*] nM concentration summary (single-cell):")
         print(f"    {'Tissue':<12} {'Cell type':<40} {'nM':>8}  {'R0/KSS':>8}")
         print(f"    {'-'*12} {'-'*40} {'-'*8}  {'-'*8}")
         for tissue_lc in sorted(SHOW):
@@ -104,7 +105,7 @@ class PBPKSimulator:
                 print(f"    {row['tissue']:<12} {row['cell_type']:<40} "
                       f"{nm:>8.2f}  {idx:>6.2f}{flag}{iv}")
 
-        print("\n[*] volume_fraction sum per tissue (should be ≈1.0):")
+        print(f"\n[*] volume_fraction sum per tissue (should be ≈1.0):")
         for tissue_lc in sorted(SHOW):
             tdf    = df[df['tissue'].str.lower() == tissue_lc]
             vf_sum = tdf['volume_fraction'].sum()
@@ -117,6 +118,7 @@ class PBPKSimulator:
         if t_half_h > 6:
             print("    [WARNING] t½_int > 6 h — verify K_INT.")
         print(f"[*] KSS = {cfg.KSS:.4f} nM   Kd = {cfg.Kd:.4f} nM")
+        print(f"[*] Target type: {'soluble' if cfg.soluble_target else 'membrane-bound'}")
 
     # ─────────────────────────────────────────────────────────────────────
     # System builder
@@ -128,7 +130,7 @@ class PBPKSimulator:
 
         State vector layout
         ───────────────────
-          y[0]                       Ctot_central (or Cc_free if no blood)
+          y[0]                       Ctot_central
           y[1 : 1+n_blood]           Rtot per blood cell type
           per solid organ:
             y[off]                   Cv
@@ -144,24 +146,24 @@ class PBPKSimulator:
         schedule    = sorted(cfg.DOSING_SCHEDULE, key=lambda x: x['time'])
         first_entry = schedule[0]
         if first_entry['time'] == 0:
-            first_dose  = first_entry['dose_mg_m2']
-            total_nmol  = first_dose * cfg.BSA / cfg.MW * 1e6
-            Cc0         = total_nmol / cfg.V_CENTRAL
+            first_dose = first_entry['dose_mg_m2']
+            total_nmol = first_dose * cfg.BSA / cfg.MW * 1e6
+            Cc0        = total_nmol / cfg.V_CENTRAL
             print(f"\n[*] t=0 dose: {first_dose} mg/m²  →  {total_nmol:.1f} nmol"
                   f"  →  Cc0 = {Cc0:.2f} nM")
         else:
             Cc0 = 0.0
             print(f"\n[*] No dose at t=0 (first dose at day {first_entry['time']})")
 
-        y0 = np.array([Cc0])   # placeholder; overwritten below if blood present
+        y0 = np.array([Cc0])
 
         # ── Blood compartment (central, intravascular TMDD) ───────────────
-        blood_data  = None
-        blood_rows  = self.df[self.df['tissue'].str.lower() == 'blood']
+        blood_data = None
+        blood_rows = self.df[self.df['tissue'].str.lower() == 'blood']
 
         if not blood_rows.empty:
-            n_blood   = len(blood_rows)
-            R0_blood  = blood_rows[nM_col].fillna(0.0).values.astype(float)
+            n_blood  = len(blood_rows)
+            R0_blood = blood_rows[nM_col].fillna(0.0).values.astype(float)
 
             vf_b = blood_rows['volume_fraction'].fillna(1.0 / n_blood).values.astype(float)
             vf_b = vf_b / vf_b.sum() if vf_b.sum() > 0 else vf_b
@@ -176,10 +178,6 @@ class PBPKSimulator:
                 'R0'       : R0_blood,
             }
 
-            # Initialise y[0] as Ctot_central (Gibiansky formulation):
-            #   Ctot_central0 = Cc0 + RC_blood_eff_scaled(t=0+)
-            #   RC_blood_eff_scaled = Rtot_eff_scaled × Cc0 / (KSS + Cc0)
-            #   where Rtot_eff_scaled = Σ(R0_i × vf_i) × V_blood / V_CENTRAL
             Rtot_eff_scaled0 = np.dot(R0_blood, vf_b) * V_BLOOD_CELLS / cfg.V_CENTRAL
             RC0_scaled       = Rtot_eff_scaled0 * Cc0 / (cfg.KSS + Cc0 + 1e-15)
             Ctot_central0    = Cc0 + RC0_scaled
@@ -189,11 +187,7 @@ class PBPKSimulator:
             print(f"      V_blood_cells        = {V_BLOOD_CELLS:.4f} L")
             print(f"      R0 range             = {R0_blood.min():.2f}–{R0_blood.max():.2f} nM")
             print(f"      Cc0 (free)           = {Cc0:.4f} nM")
-            print(f"      RC0_eff_scaled       = {RC0_scaled:.4f} nM")
             print(f"      Ctot_central0        = {Ctot_central0:.4f} nM")
-            if Cc0 > 0 and RC0_scaled / Cc0 > 0.01:
-                print(f"      [!] Blood binding sequesters "
-                      f"{RC0_scaled/Cc0*100:.1f}% of initial dose")
 
             tmdd_b = R0_blood / cfg.KSS
             risk_b = [(ct, f"{v:.1f}") for ct, v in
@@ -204,7 +198,6 @@ class PBPKSimulator:
             else:
                 print(f"      TMDD risk: none")
 
-            # Append blood Rtot states
             y0 = np.concatenate([y0, R0_blood])
         else:
             print("\n    [blood] not in data — intravascular TMDD inactive")
@@ -232,7 +225,7 @@ class PBPKSimulator:
             V_isf = spec['V_total'] * spec['f_isf']
 
             print(f"\n    [{tissue}] {n_cells} cell types")
-            print(f"      V_isf  = {V_isf:.4f} L")
+            print(f"      V_isf  = {V_isf:.4f} L    f_q = {spec['f_q']:.4f}")
             print(f"      R0     = {R0.min():.2f}–{R0.max():.2f} nM")
 
             tmdd_idx = R0 / cfg.KSS
@@ -253,10 +246,6 @@ class PBPKSimulator:
                 'tdf'      : tdf,
                 'R0'       : R0,
             })
-            # Solid organ initial conditions:
-            # Cv=0 (no drug in organ vascular at t=0, dose in central only)
-            # Ctot_isf=0 (no drug in ISF at t=0)
-            # Rtot = R0 (receptors at steady-state baseline)
             y0 = np.concatenate([y0, [0.0, 0.0], R0])
 
         return y0, system_data, blood_data, tissues
@@ -269,16 +258,8 @@ class PBPKSimulator:
         """
         Integrate ODE with event-driven restart at each dose time.
 
-        For repeat doses with blood TMDD, the dose increments Cc_free by
-        delta_Cc_raw.  We convert this to the correct Ctot_central jump:
-
-          Cc_pre        = recover_free(Ctot_pre, KSS, Rtot_eff_scaled)
-          Cc_post_free  = Cc_pre + delta_Cc_raw
-          Ctot_post     = Cc_post_free + Rtot_eff_scaled × Cc_post_free
-                          / (KSS + Cc_post_free)
-
-        This correctly accounts for instantaneous re-binding of the new
-        dose onto blood cell receptors (QSS).
+        Numerical stability — per-variable atol (CVODE/SUNDIALS strategy):
+          atol_i = max(|y0_i|, C_FLOOR) × RTOL_SCALE
         """
         cfg = self.config
         schedule = sorted(cfg.DOSING_SCHEDULE, key=lambda x: x['time'])
@@ -293,6 +274,19 @@ class PBPKSimulator:
             dCc = dm * cfg.BSA / cfg.MW * 1e6 / cfg.V_CENTRAL
             print(f"    Day {dt:>4}: {dm} mg/m²  →  +{dCc:.2f} nM free Cc")
 
+        # Tolerance setup
+        C_FLOOR    = 1e-12
+        RTOL_SCALE = 1e-4
+        RTOL       = 1e-6
+
+        atol_vec    = np.maximum(np.abs(y0), C_FLOOR) * RTOL_SCALE
+        atol_vec[0] = max(atol_vec[0], C_FLOOR * 1e3)
+
+        print(f"\n[*] Solver: Radau (implicit, L-stable)")
+        print(f"    rtol       = {RTOL:.0e}")
+        print(f"    atol range = {atol_vec.min():.2e} – {atol_vec.max():.2e}")
+        print(f"    max_step   = 0.5 day")
+
         all_t, all_y = [], []
         y_cur  = y0.copy()
         t_cur  = 0.0
@@ -302,15 +296,20 @@ class PBPKSimulator:
                 continue
 
             t_eval = np.linspace(t_cur, bp, max(10, int((bp - t_cur) * 10)))
-            seg    = solve_ivp(
+
+            atol_seg    = np.maximum(np.abs(y_cur), C_FLOOR) * RTOL_SCALE
+            atol_seg[0] = max(atol_seg[0], C_FLOOR * 1e3)
+
+            seg = solve_ivp(
                 pbpk_qss_ode,
                 t_span=(t_cur, bp),
                 y0=y_cur,
                 args=(cfg, system_data, blood_data),
                 t_eval=t_eval,
                 method='Radau',
-                rtol=1e-6,
-                atol=1e-9,
+                rtol=RTOL,
+                atol=atol_seg,
+                max_step=0.5,
             )
             if not seg.success:
                 raise RuntimeError(
@@ -322,30 +321,30 @@ class PBPKSimulator:
             y_cur = seg.y[:, -1].copy()
 
             if bp in dose_times:
-                dose_total    = sum(dm for dt, dm in dose_events if dt == bp)
-                delta_Cc_raw  = dose_total * cfg.BSA / cfg.MW * 1e6 / cfg.V_CENTRAL
+                dose_total   = sum(dm for dt, dm in dose_events if dt == bp)
+                delta_Cc_raw = dose_total * cfg.BSA / cfg.MW * 1e6 / cfg.V_CENTRAL
 
                 if blood_data is not None:
-                    n_blood         = blood_data['n_cells']
-                    vf_b            = blood_data['vol_fracs']
-                    V_blood         = blood_data['V_blood']
+                    from pbpk.equations import _recover_free_drug_vec
+                    n_blood     = blood_data['n_cells']
+                    vf_b        = blood_data['vol_fracs']
+                    V_blood     = blood_data['V_blood']
 
-                    Rtot_b          = np.maximum(y_cur[1: 1 + n_blood], 0.0)
-                    Rtot_eff_sc     = np.dot(Rtot_b, vf_b) * V_blood / cfg.V_CENTRAL
+                    Rtot_b      = np.maximum(y_cur[1: 1 + n_blood], 0.0)
+                    Rtot_eff_sc = np.dot(Rtot_b, vf_b) * V_blood / cfg.V_CENTRAL
 
-                    Ctot_pre        = max(y_cur[0], 0.0)
-                    Cc_pre          = _recover_free_drug_vec(
-                                          np.array([Ctot_pre]), cfg.KSS,
-                                          np.array([Rtot_eff_sc]))[0]
+                    Ctot_pre    = max(y_cur[0], 0.0)
+                    Cc_pre      = _recover_free_drug_vec(
+                                      np.array([Ctot_pre]), cfg.KSS,
+                                      np.array([Rtot_eff_sc]))[0]
 
-                    Cc_post_free    = Cc_pre + delta_Cc_raw
-                    RC_post_sc      = Rtot_eff_sc * Cc_post_free / (cfg.KSS + Cc_post_free + 1e-15)
-                    Ctot_post       = Cc_post_free + RC_post_sc
+                    Cc_post_free = Cc_pre + delta_Cc_raw
+                    RC_post_sc   = Rtot_eff_sc * Cc_post_free / (cfg.KSS + Cc_post_free + 1e-15)
+                    Ctot_post    = Cc_post_free + RC_post_sc
 
-                    y_cur[0]        = Ctot_post
+                    y_cur[0] = Ctot_post
                     print(f"    Day {bp}: +{delta_Cc_raw:.2f} nM free, "
-                          f"Ctot_central {Ctot_pre:.2f}→{Ctot_post:.2f} nM "
-                          f"(Cc_free {Cc_pre:.2f}→{Cc_post_free:.2f} nM)")
+                          f"Ctot {Ctot_pre:.2f}→{Ctot_post:.2f} nM")
                 else:
                     y_cur[0] += delta_Cc_raw
                     print(f"    Day {bp}: Cc {seg.y[0,-1]:.2f}→{y_cur[0]:.2f} nM")
@@ -360,17 +359,7 @@ class PBPKSimulator:
 
     def _unpack_results(self, t, y, system_data, blood_data,
                         label: str) -> pd.DataFrame:
-        """
-        Decompose ODE solution into per-cell-type time-series DataFrame.
-
-        Blood:
-          y[0] = Ctot_central → Cc_free recovered via Gibiansky quadratic.
-          RC_i, R_i computed from Cc_free and Rtot_i (QSS).
-
-        Solid organs:
-          y[off+1] = Ctot_isf → Cisf recovered via Gibiansky quadratic.
-          RC_i, R_i computed from Cisf and Rtot_i.
-        """
+        """Decompose ODE solution into per-cell-type time-series DataFrame."""
         cfg = self.config
         all_rows           = []
         Ctot_central_vals  = np.maximum(y[0], 0.0)
@@ -378,17 +367,16 @@ class PBPKSimulator:
 
         # ── Blood block ───────────────────────────────────────────────────
         if blood_data is not None:
-            n_blood   = blood_data['n_cells']
-            tdf_b     = blood_data['tdf']
-            R0_b      = blood_data['R0']
-            vf_b      = blood_data['vol_fracs']
-            V_blood   = blood_data['V_blood']
+            n_blood = blood_data['n_cells']
+            tdf_b   = blood_data['tdf']
+            R0_b    = blood_data['R0']
+            vf_b    = blood_data['vol_fracs']
+            V_blood = blood_data['V_blood']
 
             Rtot_all_b      = np.maximum(y[offset: offset + n_blood], 0.0)
-            Rtot_eff_b      = np.dot(vf_b, Rtot_all_b)                     # (n_time,)
-            Rtot_eff_scaled = Rtot_eff_b * V_blood / cfg.V_CENTRAL          # (n_time,)
+            Rtot_eff_b      = np.dot(vf_b, Rtot_all_b)
+            Rtot_eff_scaled = Rtot_eff_b * V_blood / cfg.V_CENTRAL
 
-            # Recover Cc_free from Ctot_central at every time point
             Cc_free_vals = _recover_free_drug_vec(
                 Ctot_central_vals, cfg.KSS, Rtot_eff_scaled
             )
@@ -396,12 +384,12 @@ class PBPKSimulator:
             denom_b = cfg.KSS + Cc_free_vals + 1e-15
 
             for i, row in enumerate(tdf_b.itertuples()):
-                Rtot_vals   = Rtot_all_b[i]
-                R0_i        = R0_b[i]
-                RC_vals     = Rtot_vals * Cc_free_vals / denom_b
-                R_vals      = Rtot_vals * cfg.KSS      / denom_b
-                occupancy   = RC_vals / (Rtot_vals + 1e-12) * 100.0
-                tmdd_index  = R0_i / cfg.KSS if cfg.KSS > 0 else float('nan')
+                Rtot_vals = Rtot_all_b[i]
+                R0_i      = R0_b[i]
+                RC_vals   = Rtot_vals * Cc_free_vals / denom_b
+                R_vals    = Rtot_vals * cfg.KSS      / denom_b
+                occupancy = RC_vals / (Rtot_vals + 1e-12) * 100.0
+                tmdd_idx  = R0_i / cfg.KSS if cfg.KSS > 0 else float('nan')
 
                 all_rows.append(pd.DataFrame({
                     'time'              : t,
@@ -410,8 +398,8 @@ class PBPKSimulator:
                     'cell_type'         : row.cell_type,
                     'plasma_conc_nM'    : Cc_free_vals,
                     'plasma_ctot_nM'    : Ctot_central_vals,
-                    'local_v_conc_nM'   : Cc_free_vals,    # no separate Cv
-                    'local_isf_conc_nM' : Cc_free_vals,    # no ISF
+                    'local_v_conc_nM'   : Cc_free_vals,
+                    'local_isf_conc_nM' : Cc_free_vals,
                     'local_isf_total_nM': Ctot_central_vals,
                     'free_R_nM'         : R_vals,
                     'bound_RC_nM'       : RC_vals,
@@ -421,13 +409,12 @@ class PBPKSimulator:
                     'R0_nM'             : R0_i,
                     'KSS_nM'            : cfg.KSS,
                     'Kd_nM'             : cfg.Kd,
-                    'TMDD_index'        : tmdd_index,
+                    'TMDD_index'        : tmdd_idx,
                     'max_occupancy_pct' : occupancy.max(),
                 }))
 
             offset += n_blood
 
-        # plasma_conc_nM for solid organs = Cc_free (recovered or plain)
         plasma_free_vals = Cc_free_vals if blood_data is not None else Ctot_central_vals
 
         # ── Solid organ block ─────────────────────────────────────────────
@@ -439,18 +426,18 @@ class PBPKSimulator:
             Cv_vals       = y[offset]
             Ctot_isf_vals = np.maximum(y[offset + 1], 0.0)
 
-            Rtot_all  = np.maximum(y[offset + 2: offset + 2 + n_cells], 0.0)
-            Rtot_eff  = np.dot(vol_fracs, Rtot_all)
+            Rtot_all = np.maximum(y[offset + 2: offset + 2 + n_cells], 0.0)
+            Rtot_eff = np.dot(vol_fracs, Rtot_all)
             Cisf_vals = _recover_free_drug_vec(Ctot_isf_vals, cfg.KSS, Rtot_eff)
 
             for i, row in enumerate(tdf.itertuples()):
-                Rtot_vals  = Rtot_all[i]
-                R0_i       = R0_arr[i]
-                denom      = cfg.KSS + Cisf_vals + 1e-15
-                RC_vals    = Rtot_vals * Cisf_vals / denom
-                R_vals     = Rtot_vals * cfg.KSS   / denom
-                occupancy  = RC_vals / (Rtot_vals + 1e-12) * 100.0
-                tmdd_index = R0_i / cfg.KSS if cfg.KSS > 0 else float('nan')
+                Rtot_vals = Rtot_all[i]
+                R0_i      = R0_arr[i]
+                denom     = cfg.KSS + Cisf_vals + 1e-15
+                RC_vals   = Rtot_vals * Cisf_vals / denom
+                R_vals    = Rtot_vals * cfg.KSS   / denom
+                occupancy = RC_vals / (Rtot_vals + 1e-12) * 100.0
+                tmdd_idx  = R0_i / cfg.KSS if cfg.KSS > 0 else float('nan')
 
                 all_rows.append(pd.DataFrame({
                     'time'              : t,
@@ -469,7 +456,7 @@ class PBPKSimulator:
                     'R0_nM'             : R0_i,
                     'KSS_nM'            : cfg.KSS,
                     'Kd_nM'             : cfg.Kd,
-                    'TMDD_index'        : tmdd_index,
+                    'TMDD_index'        : tmdd_idx,
                     'max_occupancy_pct' : occupancy.max(),
                 }))
 
@@ -532,9 +519,9 @@ class PBPKSimulator:
               f"{'Bulk R0/KSS':>12} {'SC R0/KSS':>10} {'Δ':>8}")
         print(f"  {'-'*12} {'-'*35} {'-'*12} {'-'*10} {'-'*8}")
 
-        t0        = df_sc['time'].min()
-        sc_t0     = df_sc[df_sc['time'] == t0]
-        bulk_t0   = df_bulk[df_bulk['time'] == t0]
+        t0      = df_sc['time'].min()
+        sc_t0   = df_sc[df_sc['time'] == t0]
+        bulk_t0 = df_bulk[df_bulk['time'] == t0]
 
         for tissue in sorted(df_sc['tissue'].unique()):
             if str(tissue).lower() == 'plasma':
