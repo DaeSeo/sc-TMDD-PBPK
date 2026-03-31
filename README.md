@@ -1,4 +1,4 @@
-# Single-Cell Resolution PBPK
+# Single-Cell Resolution PBPK Modeling with Joint Cross-Tissue Bayesian MCMC Inference
 
 A computational platform for **single-cell resolved Physiologically Based Pharmacokinetic (PBPK)** modeling with **target-mediated drug disposition (TMDD)** de-risking. The platform estimates cell-type-specific receptor concentrations (nM) by integrating single-cell RNA-seq data with bulk tissue proteomics through joint cross-tissue Bayesian MCMC inference, then simulates per-cell-type drug–target engagement dynamics across human tissues.
 
