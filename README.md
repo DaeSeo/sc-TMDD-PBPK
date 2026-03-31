@@ -1,4 +1,4 @@
-# Single-Cell Resolution PBPK Modeling with Joint Cross-Tissue Bayesian MCMC Inference
+# Single-Cell Resolution PBPK
 
 A computational platform for **single-cell resolved Physiologically Based Pharmacokinetic (PBPK)** modeling with **target-mediated drug disposition (TMDD)** de-risking. The platform estimates cell-type-specific receptor concentrations (nM) by integrating single-cell RNA-seq data with bulk tissue proteomics through joint cross-tissue Bayesian MCMC inference, then simulates per-cell-type drug–target engagement dynamics across human tissues.
 
@@ -7,13 +7,13 @@ A computational platform for **single-cell resolved Physiologically Based Pharma
 Conventional PBPK-TMDD models parameterize receptor concentrations using bulk tissue averages, implicitly assuming homogeneous expression within each tissue. This platform resolves that limitation by:
 
 1. **Bayesian deconvolution** — A joint hierarchical MCMC model decomposes bulk tissue proteomics (PaxDb, PPM) into cell-type-level protein concentrations using single-cell RNA-seq proportions (HPA, nCPM) with shared translation efficiency parameters across tissues.
-2. **First-principles PPM → nM conversion** — Tissue-specific protein densities (ρ, mg/mL) and average proteome molecular weights convert PPM to molar concentrations: `C (nM) = PPM × ρ × 10³ / MW_avg`.
+2. **Tissue-specific PPM → nM conversion** — Tissue-specific protein densities (ρ, mg/mL) and average proteome molecular weights convert PPM to molar concentrations: `C (nM) = PPM × ρ × 10³ / MW_avg`.
 3. **Per-cell-type PBPK-TMDD** — A whole-body QSS-TMDD model (Gibiansky formulation) resolves receptor dynamics for every cell type in every tissue simultaneously, enabling direct comparison of single-cell vs. bulk TMDD risk (R₀/K_SS).
 
 ## Folder Structure
 
 ```
-Single_Cell_Res_PBPK/
+Single-Cell-Resolution-PBPK-Modeling-with-Joint-Cross-Tissue-Bayesian-MCMC-Inference/
 ├── inference/
 │   ├── __init__.py
 │   ├── bayesian_ppm.py         # Joint cross-tissue Bayesian MCMC (PyMC/NUTS)
@@ -37,8 +37,8 @@ Single_Cell_Res_PBPK/
 Requires **Python 3.11+**. A virtual environment is recommended.
 
 ```bash
-git clone https://github.com/[YOUR_USERNAME]/Single_Cell_Res_PBPK.git
-cd Single_Cell_Res_PBPK
+git clone https://github.com/[YOUR_USERNAME]/Single-Cell-Resolution-PBPK-Modeling-with-Joint-Cross-Tissue-Bayesian-MCMC-Inference.git
+cd Single-Cell-Resolution-PBPK-Modeling-with-Joint-Cross-Tissue-Bayesian-MCMC-Inference
 
 python -m venv .venv
 source .venv/bin/activate        # Linux/macOS
@@ -128,7 +128,7 @@ where ρ values are derived from published tissue protein density measurements (
 | Skin | 80 | 50,000 | 1.600 |
 | Blood | 70 | 55,000 | 1.273 |
 
-This first-principles approach is tissue-specific by construction and agrees with the independent empirical PaxDb-to-molarity correlation reported by Sepp & Muliaditan (2024, mAbs).
+This approach is tissue-specific by construction and agrees with the independent empirical PaxDb-to-molarity correlation reported by Sepp & Muliaditan (2024, mAbs).
 
 ### Bayesian MCMC Model
 
