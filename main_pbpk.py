@@ -62,9 +62,9 @@ def main():
     # ── Multi-dose arguments ───────────────────────────────────────────────
     parser.add_argument('--multi',   action='store_true',
                         help='Run multiple independent single-dose simulations')
-    parser.add_argument('--doses',   type=str,   default='0.1,1,10,100',
+    parser.add_argument('--doses',   type=str,   default='0.1,1,10,100,500',
                         help='Comma-separated dose list for --multi (mg/m²). '
-                             'Default: "0.1,1,10,100"')
+                             'Default: "0.1,1,10,100,500"')
 
     args = parser.parse_args()
 
@@ -72,7 +72,7 @@ def main():
     print(f" Single-Cell Resolution PBPK Simulation")
     print(f"{'='*60}")
 
-    # ── Multi-dose mode ────────────────────────────────────────────────────
+    # ── Multi-dose mode ────────────────────────────────────────────────
     if args.multi:
         doses = [float(d.strip()) for d in args.doses.split(',')]
         if not doses:
