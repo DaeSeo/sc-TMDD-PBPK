@@ -16,6 +16,29 @@ Two simulation modes
 ────────────────────
   run_single_cell() : Bayesian-inferred per-cell-type nM
   run_bulk()        : tissue-average bulk nM
+
+Column mapping for R0 (receptor initial concentration)
+───────────────────────────────────────────────────────
+  BULK mode:
+    nM_col = 'bulk_nM_concentration'  (= bulk_nM_membrane_ISF)
+    This is the tissue-average ISF receptor concentration,
+    equivalent to Sepp (2024) mRint,organ.
+    Consistent with Cisf (ISF drug conc.) in ODE units.
+
+  SINGLE-CELL mode:
+    nM_col = 'nM_concentration'  (= nM_local_ISF per cell type)
+    The ODE computes Rtot_eff = Σ(vol_frac_i × R0_i).
+    With R0_i = nM_local_ISF_i:
+      Rtot_eff = Σ(vol_frac_i × nM_local_ISF_i) = bulk_nM_membrane_ISF  ✓
+    Using contribution_to_bulk_ISF instead would apply vol_frac twice
+    (double-weighting), giving Rtot_eff = Σ(nM_local_ISF_i × vol_frac_i²),
+    which is INCORRECT.
+
+  NOTE: nM_local_ISF and bulk_nM_membrane_ISF (ISF units) are the correct
+  quantities for R0 because the ODE drug state Cisf is also in ISF-volume
+  concentration units — unit consistency requires both in nM ISF.
+  The '_tissue' variants (bulk_nM_membrane_tissue, contribution_to_bulk_tissue)
+  are pre-f_ISF values used for Sepp comparison bookkeeping only.
 """
 
 import os
@@ -59,8 +82,11 @@ class PBPKSimulator:
         cfg = self.config
         df  = self.df
 
+        # nM_concentration      = nM_local_ISF  (single-cell R0, ISF units)
+        # bulk_nM_concentration = bulk_nM_membrane_ISF  (bulk R0, ISF units)
         REQUIRED = ['tissue', 'cell_type', 'nM_concentration',
-                     'bulk_nM_concentration', 'volume_fraction', 'cells']
+                    'bulk_nM_concentration', 'volume_fraction', 'cells']
+
         missing_cols = [c for c in REQUIRED if c not in df.columns]
         if missing_cols:
             raise ValueError(
@@ -90,20 +116,20 @@ class PBPKSimulator:
         else:
             print(f"[✓] Σ f_q = {fq_sum:.4f} (mass balance OK)")
 
-        # nM summary
+        # nM summary (single-cell R0 = nM_concentration = nM_local_ISF)
         SHOW = {str(t).lower() for t in df['tissue'].unique()} - {'plasma'}
-        print(f"\n[*] nM concentration summary (single-cell):")
-        print(f"    {'Tissue':<12} {'Cell type':<40} {'nM':>8}  {'R0/KSS':>8}")
-        print(f"    {'-'*12} {'-'*40} {'-'*8}  {'-'*8}")
+        print(f"\n[*] nM concentration summary (single-cell, ISF units):")
+        print(f"    {'Tissue':<12} {'Cell type':<40} {'R0 (nM)':>10}  {'R0/KSS':>8}")
+        print(f"    {'-'*12} {'-'*40} {'-'*10}  {'-'*8}")
         for tissue_lc in sorted(SHOW):
             tdf = df[df['tissue'].str.lower() == tissue_lc]
             iv  = " [iv]" if tissue_lc == 'blood' else ""
             for _, row in tdf.iterrows():
-                nm  = row['nM_concentration']
+                nm  = row['nM_concentration']   # nM_local_ISF
                 idx = nm / cfg.KSS if cfg.KSS > 0 else float('nan')
                 flag = "  ← TMDD RISK" if idx > 1.0 else ""
                 print(f"    {row['tissue']:<12} {row['cell_type']:<40} "
-                      f"{nm:>8.2f}  {idx:>6.2f}{flag}{iv}")
+                      f"{nm:>10.2f}  {idx:>8.2f}{flag}{iv}")
 
         print(f"\n[*] volume_fraction sum per tissue (should be ≈1.0):")
         for tissue_lc in sorted(SHOW):
@@ -128,6 +154,18 @@ class PBPKSimulator:
         """
         Construct system_data (solid organs), blood_data, and initial y0.
 
+        R0 column selection
+        ───────────────────
+          Bulk mode   → 'bulk_nM_concentration' (= bulk_nM_membrane_ISF)
+            Single tissue-average ISF receptor concentration.
+            ODE uses this directly as Rtot_eff.
+
+          SC mode     → 'nM_concentration'  (= nM_local_ISF per cell type)
+            ODE applies vol_frac weighting:
+              Rtot_eff = Σ(vol_frac_i × nM_local_ISF_i) = bulk_nM_ISF  ✓
+            This is mathematically equivalent to bulk mode for aggregate
+            dynamics, but resolves per-cell-type occupancy individually.
+
         State vector layout
         ───────────────────
           y[0]                       Ctot_central
@@ -138,9 +176,13 @@ class PBPKSimulator:
             y[off+2 : off+2+n]       Rtot per cell type
         """
         cfg    = self.config
+        # ── R0 column: ISF concentration units in both modes ─────────────────
+        # bulk_nM_concentration = bulk_nM_membrane_ISF  (tissue-level ISF nM)
+        # nM_concentration      = nM_local_ISF          (per-cell ISF nM)
+        # Both are in ISF-volume nM, consistent with Cisf in the ODE.
         nM_col = 'bulk_nM_concentration' if use_bulk else 'nM_concentration'
         label  = "BULK" if use_bulk else "SINGLE-CELL"
-        print(f"\n[*] Building system — {label}  (nM col: '{nM_col}')")
+        print(f"\n[*] Building system — {label}  (R0 col: '{nM_col}')")
 
         # ── Dose at t=0 ──────────────────────────────────────────────────
         schedule    = sorted(cfg.DOSING_SCHEDULE, key=lambda x: x['time'])
@@ -224,9 +266,12 @@ class PBPKSimulator:
             spec  = cfg.TISSUE_SPECS[spec_key]
             V_isf = spec['V_total'] * spec['f_isf']
 
+            # Effective R0 check (SC: Rtot_eff = dot(vf, R0) = bulk_nM_ISF)
+            Rtot_eff_check = float(np.dot(vf, R0))
             print(f"\n    [{tissue}] {n_cells} cell types")
-            print(f"      V_isf  = {V_isf:.4f} L    f_q = {spec['f_q']:.4f}")
-            print(f"      R0     = {R0.min():.2f}–{R0.max():.2f} nM")
+            print(f"      V_isf      = {V_isf:.4f} L    f_q = {spec['f_q']:.4f}")
+            print(f"      R0 range   = {R0.min():.2f}–{R0.max():.2f} nM")
+            print(f"      Rtot_eff   = {Rtot_eff_check:.2f} nM  (= Σ vol_frac×R0)")
 
             tmdd_idx = R0 / cfg.KSS
             risk_t   = [(ct, f"{v:.1f}") for ct, v in
@@ -482,7 +527,7 @@ class PBPKSimulator:
     # ─────────────────────────────────────────────────────────────────────
 
     def run_single_cell(self, days: int = 120) -> pd.DataFrame:
-        """PBPK with Bayesian single-cell nM concentrations."""
+        """PBPK with Bayesian single-cell nM concentrations (nM_local_ISF as R0)."""
         print(f"\n{'─'*60}")
         print(f"  SINGLE-CELL PBPK — QSS  ({days} days)")
         print(f"{'─'*60}")
@@ -491,7 +536,7 @@ class PBPKSimulator:
         return self._unpack_results(t, y, system_data, blood_data, "single_cell")
 
     def run_bulk(self, days: int = 120) -> pd.DataFrame:
-        """PBPK with bulk tissue-average nM concentrations."""
+        """PBPK with bulk tissue-average nM concentrations (bulk_nM_membrane_ISF as R0)."""
         print(f"\n{'─'*60}")
         print(f"  BULK PBPK — QSS  ({days} days)")
         print(f"{'─'*60}")
@@ -511,7 +556,7 @@ class PBPKSimulator:
         df_all.to_csv(out_path, index=False)
         print(f"\n[✓] Saved → {out_path}  ({len(df_all):,} rows)")
 
-        # SC vs Bulk comparison
+        # SC vs Bulk TMDD comparison
         print(f"\n{'='*60}")
         print(f"  BULK vs SINGLE-CELL TMDD  (KSS={self.config.KSS:.4f} nM)")
         print(f"{'='*60}")
@@ -529,10 +574,10 @@ class PBPKSimulator:
             iv = "  [iv]" if str(tissue).lower() == 'blood' else ""
 
             merged = (
-                sc_t0[sc_t0['tissue'] == tissue][['cell_type','TMDD_index']]
+                sc_t0[sc_t0['tissue'] == tissue][['cell_type', 'TMDD_index']]
                 .merge(
-                    bulk_t0[bulk_t0['tissue'] == tissue][['cell_type','TMDD_index']],
-                    on='cell_type', suffixes=('_sc','_bulk')
+                    bulk_t0[bulk_t0['tissue'] == tissue][['cell_type', 'TMDD_index']],
+                    on='cell_type', suffixes=('_sc', '_bulk')
                 )
             )
             for _, row in merged.iterrows():

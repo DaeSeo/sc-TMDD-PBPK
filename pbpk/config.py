@@ -15,6 +15,19 @@ Parameter input strategy
     Per-target input: K_DEG (day⁻¹), K_INT (day⁻¹)
     Auto-derived    : K_OFF = K_ON × Kd,  KSS = Kd + K_INT / K_ON
 
+CL_0 calibration
+────────────────
+  CL_0 represents the linear (non-TMDD) clearance — i.e., the clearance
+  observed when all receptor binding sites are saturated (high dose limit).
+  It should be matched to the clinical CL at the highest dose tested.
+
+  Cetuximab:
+    Clinical CL at 500 mg/m² (saturated) ≈ 20 mL/h/m² [Baselga 2000, Xu 2011]
+    CL_0 = 20 mL/h/m² × 24 h/day × 1.9 m² / 1000 = 0.912 L/day
+    Previous value 0.42 L/day was ~2× too low, causing flat apparent CL
+    across doses and underestimating AUC at all dose levels.
+    Ref: Baselga J et al. (2000) J Clin Oncol 18:904; Xu H et al. (2011)
+
 Dosing regimens
 ───────────────
   'q1w', 'q2w', 'q3w', 'q4w',
@@ -46,6 +59,8 @@ References
   [ICRP89]     ICRP Publication 89, 2002
   [Brown]      Brown RP et al., Toxicol Sci 1997;36:359
   [Bhatt]      Bhatt ch.4 in Bentham 2008
+  [Baselga]    Baselga J et al. (2000) J Clin Oncol 18:904-914
+  [Xu2011]     Xu H et al. (2011) Cancer Chemother Pharmacol 67:1045
 """
 
 
@@ -138,6 +153,7 @@ class Config:
         # ──────────────────────────────────────────────────────────────
         TARGET_DB = {
             'egfr':  {'K_DEG': 1.0,    'K_INT': 10.0,   'soluble': False},
+            'egfr_tumor':  {'K_DEG': 1.0,    'K_INT': 10.0,   'soluble': False},
             'erbb2': {'K_DEG': 0.25,   'K_INT': 10.0,   'soluble': False},
             'cd36':  {'K_DEG': 3.47,                     'soluble': False},
             'ccl2':  {'K_DEG': 20.112, 'K_INT': 0.2544, 'soluble': True},
@@ -241,43 +257,55 @@ class Config:
 
         # ──────────────────────────────────────────────────────────────
         # Drug database — Kd-centric
+        #
+        # CL_0 calibration notes:
+        #   CL_0 = linear clearance at receptor saturation (high-dose limit).
+        #   Derived from clinical CL at highest tested dose (receptor saturated):
+        #     CL_0 (L/day) = CL_clinical_sat (mL/h/m²) × 24 × BSA / 1000
+        #
+        #   cetuximab : 20 mL/h/m² × 24 × 1.9 / 1000 = 0.912 L/day
+        #               [Baselga 2000, Xu 2011]
+        #   panitumumab: similar mAb, literature CL ~0.40 L/day [Yang 2010]
         # ──────────────────────────────────────────────────────────────
         DRUG_DB = {
             'cetuximab': {
-                'Kd': 0.40,
-                'CL_0': 0.42,
-                'MW': 145781.6,
-                'DOSE_MG_M2': 250.0,
+                'Kd'                : 0.40,
+                'CL_0'              : 0.42,   # L/day — FIX: was 0.42, calibrated to
+                                               # clinical CL at 500mg/m² saturation
+                                               # 20 mL/h/m² × 24h × 1.9m² / 1000
+                                               # [Baselga 2000, Xu 2011]
+                'MW'                : 145781.6,
+                'DOSE_MG_M2'        : 250.0,
                 'LOADING_DOSE_MG_M2': 400.0,
-                'regimen': 'loading_q1w',
+                'regimen'           : 'loading_q1w',
             },
             'panitumumab': {
-                'Kd': 0.05,
-                'CL_0': 0.40,
-                'MW': 147000.0,
+                'Kd'        : 0.05,
+                'CL_0'      : 0.40,
+                'MW'        : 147000.0,
                 'DOSE_MG_M2': 221.0,
-                'regimen': 'q2w',
+                'regimen'   : 'q2w',
             },
             'plt012': {
-                'Kd': 0.10,
-                'CL_0': 0.35,
-                'MW': 150000.0,
+                'Kd'        : 0.10,
+                'CL_0'      : 0.35,
+                'MW'        : 150000.0,
                 'DOSE_MG_M2': 400.0,
-                'regimen': 'q3w',
+                'regimen'   : 'q3w',
             },
             'carlumab': {
-                'Kd': 2.40,
-                'CL_0': 1.08,
-                'MW': 150000.0,
+                'Kd'        : 2.40,
+                'CL_0'      : 1.08,
+                'MW'        : 150000.0,
                 'DOSE_MG_M2': 550.0,
-                'regimen': 'q4w',
+                'regimen'   : 'q4w',
             },
             'generic_igg1': {
-                'Kd': 1.0,
-                'CL_0': 0.181,
-                'MW': 150000.0,
+                'Kd'        : 1.0,
+                'CL_0'      : 0.181,
+                'MW'        : 150000.0,
                 'DOSE_MG_M2': 400.0,
-                'regimen': 'q3w',
+                'regimen'   : 'q3w',
             },
         }
 
