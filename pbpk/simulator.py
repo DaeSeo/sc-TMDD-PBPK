@@ -199,48 +199,82 @@ class PBPKSimulator:
 
         y0 = np.array([Cc0])
 
-        # ── Blood compartment (central, intravascular TMDD) ───────────────
-        blood_data = None
-        blood_rows = self.df[self.df['tissue'].str.lower() == 'blood']
+        # ── Blood compartment — auto-split by cell_type name ─────────────
+        #
+        # DEFAULT RULE (no CLI flag needed):
+        #   cell_type starts with 'soluble_'  → plasma pool  (SC = Bulk, R0 always bulk)
+        #   everything else                   → membrane TMDD on blood cells (SC ≠ Bulk OK)
+        #
+        # This covers mixed cases (e.g. EGFR data has both soluble_EGFR
+        # and membrane-bound b-cells / t-cells in the same blood tissue).
+        #
+        # State vector ordering MUST match equations.py offset logic:
+        #   y[0]                  Ctot_central
+        #   y[1 : 1+n_blood]      Rtot membrane blood cells   (if blood_data)
+        #   y[1+n_blood]          R_sol                        (if soluble_data)
+        #   solid organs follow…
+        # ─────────────────────────────────────────────────────────────────
+        blood_data   = None
+        soluble_data = None
+        blood_rows   = self.df[self.df['tissue'].str.lower() == 'blood']
 
         if not blood_rows.empty:
-            n_blood  = len(blood_rows)
-            R0_blood = blood_rows[nM_col].fillna(0.0).values.astype(float)
+            is_sol        = blood_rows['cell_type'].str.lower().str.startswith('soluble_')
+            soluble_rows  = blood_rows[is_sol]
+            membrane_rows = blood_rows[~is_sol]
 
-            vf_b = blood_rows['volume_fraction'].fillna(1.0 / n_blood).values.astype(float)
-            vf_b = vf_b / vf_b.sum() if vf_b.sum() > 0 else vf_b
+            # ── 1) Membrane entries FIRST → y[1:1+n_blood] ───────────────
+            if not membrane_rows.empty:
+                n_blood  = len(membrane_rows)
+                R0_blood = membrane_rows[nM_col].fillna(0.0).values.astype(float)
 
-            blood_data = {
-                'name'     : 'blood',
-                'n_cells'  : n_blood,
-                'vol_fracs': vf_b,
-                'ksyn_vec' : cfg.K_DEG * R0_blood,
-                'V_blood'  : V_BLOOD_CELLS,
-                'tdf'      : blood_rows,
-                'R0'       : R0_blood,
-            }
+                vf_b = membrane_rows['volume_fraction'].fillna(
+                    1.0 / n_blood).values.astype(float)
+                vf_b = vf_b / vf_b.sum() if vf_b.sum() > 0 else vf_b
 
-            Rtot_eff_scaled0 = np.dot(R0_blood, vf_b) * V_BLOOD_CELLS / cfg.V_CENTRAL
-            RC0_scaled       = Rtot_eff_scaled0 * Cc0 / (cfg.KSS + Cc0 + 1e-15)
-            Ctot_central0    = Cc0 + RC0_scaled
-            y0[0]            = Ctot_central0
+                Rtot_eff_scaled0 = np.dot(R0_blood, vf_b) * V_BLOOD_CELLS / cfg.V_CENTRAL
+                RC0_scaled       = Rtot_eff_scaled0 * Cc0 / (cfg.KSS + Cc0 + 1e-15)
+                y0[0]            = Cc0 + RC0_scaled
 
-            print(f"\n    [blood] {n_blood} cell types  (intravascular, central TMDD)")
-            print(f"      V_blood_cells        = {V_BLOOD_CELLS:.4f} L")
-            print(f"      R0 range             = {R0_blood.min():.2f}–{R0_blood.max():.2f} nM")
-            print(f"      Cc0 (free)           = {Cc0:.4f} nM")
-            print(f"      Ctot_central0        = {Ctot_central0:.4f} nM")
+                blood_data = {
+                    'name'     : 'blood',
+                    'n_cells'  : n_blood,
+                    'vol_fracs': vf_b,
+                    'ksyn_vec' : cfg.K_DEG * R0_blood,
+                    'V_blood'  : V_BLOOD_CELLS,
+                    'tdf'      : membrane_rows,
+                    'R0'       : R0_blood,
+                }
+                y0 = np.concatenate([y0, R0_blood])   # y[1:1+n_blood]
 
-            tmdd_b = R0_blood / cfg.KSS
-            risk_b = [(ct, f"{v:.1f}") for ct, v in
-                      zip(blood_rows['cell_type'].values, tmdd_b) if v > 1.0]
-            if risk_b:
-                print(f"      TMDD risk (R0/KSS > 1): "
-                      + ", ".join(f"{ct}={v}" for ct, v in risk_b))
+                print(f"\n    [blood — membrane] {n_blood} cell types")
+                print(f"      R0 range   = {R0_blood.min():.2f}–{R0_blood.max():.2f} nM")
+                tmdd_b = R0_blood / cfg.KSS
+                risk_b = [(ct, f"{v:.1f}") for ct, v in
+                          zip(membrane_rows['cell_type'].values, tmdd_b) if v > 1.0]
+                if risk_b:
+                    print(f"      TMDD risk: "
+                          + ", ".join(f"{ct}={v}" for ct, v in risk_b))
+                else:
+                    print(f"      TMDD risk: none")
             else:
-                print(f"      TMDD risk: none")
+                print("\n    [blood — membrane] no membrane cell types in data")
 
-            y0 = np.concatenate([y0, R0_blood])
+            # ── 2) Soluble entries SECOND → y[1+n_blood] ─────────────────
+            if not soluble_rows.empty:
+                R0_sol = float(soluble_rows['bulk_nM_concentration'].fillna(0.0).mean())
+                soluble_data = {
+                    'R0'  : R0_sol,
+                    'ksyn': cfg.K_DEG * R0_sol,
+                    'tdf' : soluble_rows,
+                }
+                y0 = np.concatenate([y0, [R0_sol]])   # y[1+n_blood] or y[1] if no membrane
+
+                print(f"\n    [soluble — plasma pool]  "
+                      f"{soluble_rows['cell_type'].tolist()}")
+                print(f"      R0 = {R0_sol:.4f} nM  (bulk_nM; SC = Bulk always)")
+                print(f"      TMDD index R0/KSS = {R0_sol/cfg.KSS:.2f}"
+                      + ("  ← TMDD RISK" if R0_sol / cfg.KSS > 1 else ""))
         else:
             print("\n    [blood] not in data — intravascular TMDD inactive")
 
@@ -293,13 +327,13 @@ class PBPKSimulator:
             })
             y0 = np.concatenate([y0, [0.0, 0.0], R0])
 
-        return y0, system_data, blood_data, tissues
+        return y0, system_data, blood_data, soluble_data, tissues
 
     # ─────────────────────────────────────────────────────────────────────
     # ODE integrator with repeated dosing
     # ─────────────────────────────────────────────────────────────────────
 
-    def _solve_with_dosing(self, y0, system_data, blood_data, days: int):
+    def _solve_with_dosing(self, y0, system_data, blood_data, soluble_data, days: int):
         """
         Integrate ODE with event-driven restart at each dose time.
 
@@ -349,7 +383,7 @@ class PBPKSimulator:
                 pbpk_qss_ode,
                 t_span=(t_cur, bp),
                 y0=y_cur,
-                args=(cfg, system_data, blood_data),
+                args=(cfg, system_data, blood_data, soluble_data),
                 t_eval=t_eval,
                 method='Radau',
                 rtol=RTOL,
@@ -402,7 +436,7 @@ class PBPKSimulator:
     # Result unpacker
     # ─────────────────────────────────────────────────────────────────────
 
-    def _unpack_results(self, t, y, system_data, blood_data,
+    def _unpack_results(self, t, y, system_data, blood_data, soluble_data,
                         label: str) -> pd.DataFrame:
         """Decompose ODE solution into per-cell-type time-series DataFrame."""
         cfg = self.config
@@ -410,7 +444,8 @@ class PBPKSimulator:
         Ctot_central_vals  = np.maximum(y[0], 0.0)
         offset             = 1
 
-        # ── Blood block ───────────────────────────────────────────────────
+        # ── Blood membrane block (y[1:1+n_blood]) ────────────────────────
+        # Must be read FIRST — matches _build_system and equations.py ordering.
         if blood_data is not None:
             n_blood = blood_data['n_cells']
             tdf_b   = blood_data['tdf']
@@ -425,7 +460,6 @@ class PBPKSimulator:
             Cc_free_vals = _recover_free_drug_vec(
                 Ctot_central_vals, cfg.KSS, Rtot_eff_scaled
             )
-
             denom_b = cfg.KSS + Cc_free_vals + 1e-15
 
             for i, row in enumerate(tdf_b.itertuples()):
@@ -457,10 +491,58 @@ class PBPKSimulator:
                     'TMDD_index'        : tmdd_idx,
                     'max_occupancy_pct' : occupancy.max(),
                 }))
-
             offset += n_blood
 
-        plasma_free_vals = Cc_free_vals if blood_data is not None else Ctot_central_vals
+        # ── Soluble plasma pool block (y[1+n_blood] or y[1] if no membrane) ──
+        # Must be read SECOND — matches _build_system and equations.py ordering.
+        # SC and Bulk output identical values here (R0 always bulk_nM).
+        if soluble_data is not None:
+            R_sol_vals  = np.maximum(y[offset], 0.0)
+            # Recover Cc_free accounting for membrane blood RC (if any)
+            if blood_data is not None:
+                Cc_free_sol = Cc_free_vals   # already computed above
+            else:
+                Cc_free_sol = _recover_free_drug_vec(
+                    Ctot_central_vals, cfg.KSS, np.zeros_like(Ctot_central_vals)
+                )
+            denom_sol   = cfg.KSS + Cc_free_sol + 1e-15
+            RC_sol_vals = R_sol_vals * Cc_free_sol / denom_sol
+            R_sol_free  = R_sol_vals * cfg.KSS    / denom_sol
+            occ_sol     = RC_sol_vals / (R_sol_vals + 1e-12) * 100.0
+            R0_sol      = soluble_data['R0']
+            tmdd_sol    = R0_sol / cfg.KSS if cfg.KSS > 0 else float('nan')
+
+            for _, srow in soluble_data['tdf'].iterrows():
+                all_rows.append(pd.DataFrame({
+                    'time'              : t,
+                    'mode'              : label,
+                    'tissue'            : 'blood',
+                    'cell_type'         : srow['cell_type'],
+                    'plasma_conc_nM'    : Cc_free_sol,
+                    'plasma_ctot_nM'    : Ctot_central_vals,
+                    'local_v_conc_nM'   : Cc_free_sol,
+                    'local_isf_conc_nM' : Cc_free_sol,
+                    'local_isf_total_nM': Ctot_central_vals,
+                    'free_R_nM'         : R_sol_free,
+                    'bound_RC_nM'       : RC_sol_vals,
+                    'total_R_nM'        : R_sol_vals,
+                    'occupancy_pct'     : occ_sol,
+                    'free_R_fraction'   : R_sol_free / (R_sol_vals + 1e-12),
+                    'R0_nM'             : R0_sol,
+                    'KSS_nM'            : cfg.KSS,
+                    'Kd_nM'             : cfg.Kd,
+                    'TMDD_index'        : tmdd_sol,
+                    'max_occupancy_pct' : occ_sol.max(),
+                }))
+            offset += 1
+
+        # plasma_free_vals: used as Cc_free reference for solid organ output rows
+        if blood_data is not None:
+            plasma_free_vals = Cc_free_vals
+        elif soluble_data is not None:
+            plasma_free_vals = Cc_free_sol
+        else:
+            plasma_free_vals = Ctot_central_vals
 
         # ── Solid organ block ─────────────────────────────────────────────
         for tissue in system_data:
@@ -531,18 +613,18 @@ class PBPKSimulator:
         print(f"\n{'─'*60}")
         print(f"  SINGLE-CELL PBPK — QSS  ({days} days)")
         print(f"{'─'*60}")
-        y0, system_data, blood_data, _ = self._build_system(use_bulk=False)
-        t, y = self._solve_with_dosing(y0, system_data, blood_data, days)
-        return self._unpack_results(t, y, system_data, blood_data, "single_cell")
+        y0, system_data, blood_data, soluble_data, _ = self._build_system(use_bulk=False)
+        t, y = self._solve_with_dosing(y0, system_data, blood_data, soluble_data, days)
+        return self._unpack_results(t, y, system_data, blood_data, soluble_data, "single_cell")
 
     def run_bulk(self, days: int = 120) -> pd.DataFrame:
         """PBPK with bulk tissue-average nM concentrations (bulk_nM_membrane_ISF as R0)."""
         print(f"\n{'─'*60}")
         print(f"  BULK PBPK — QSS  ({days} days)")
         print(f"{'─'*60}")
-        y0, system_data, blood_data, _ = self._build_system(use_bulk=True)
-        t, y = self._solve_with_dosing(y0, system_data, blood_data, days)
-        return self._unpack_results(t, y, system_data, blood_data, "bulk")
+        y0, system_data, blood_data, soluble_data, _ = self._build_system(use_bulk=True)
+        t, y = self._solve_with_dosing(y0, system_data, blood_data, soluble_data, days)
+        return self._unpack_results(t, y, system_data, blood_data, soluble_data, "bulk")
 
     def run_all_and_save(self, output_filename: str = "pbpk_results.csv",
                          days: int = 120):

@@ -117,20 +117,34 @@ def _recover_free_drug_vec(Ctot_vec, KSS: float, Rtot_eff_vec):
 # Main ODE
 # ──────────────────────────────────────────────────────────────────────────────
 
-def pbpk_qss_ode(t, y, params, system_data, blood_data=None):
+def pbpk_qss_ode(t, y, params, system_data, blood_data=None, soluble_data=None):
     """
     ODE right-hand side: whole-body PBPK + TMDD (QSS, Gibiansky 2008).
 
     Parameters
     ----------
-    t           : float         current time (days)
-    y           : ndarray       state vector
-    params      : Config        PK/PD parameters
-    system_data : list[dict]    solid organ specifications
-    blood_data  : dict | None   blood cell data (activates central TMDD)
+    t             : float         current time (days)
+    y             : ndarray       state vector
+    params        : Config        PK/PD parameters
+    system_data   : list[dict]    solid organ specifications
+    blood_data    : dict | None   blood cell membrane TMDD (membrane targets only)
+    soluble_data  : dict | None   plasma-phase soluble target pool
+                                  Mutually exclusive with blood_data:
+                                  when soluble_target=True, blood_data=None.
+
+    State vector layout
+    ───────────────────
+    Membrane target (soluble_data=None):
+      y[0]              Ctot_central
+      y[1:1+n_blood]    Rtot per blood cell type  (if blood_data)
+      per solid organ:  [Cv, Ctot_isf, Rtot_1..n]
+
+    Soluble target (blood_data=None):
+      y[0]              Ctot_central
+      y[1]              R_sol  (soluble receptor pool in plasma)
+      per solid organ:  [Cv, Ctot_isf, Rtot_1..n]
     """
     KSS             = params.KSS
-    soluble         = getattr(params, 'soluble_target', False)
     all_derivatives = []
     offset          = 1
 
@@ -163,6 +177,31 @@ def pbpk_qss_ode(t, y, params, system_data, blood_data=None):
         Cc_free      = _recover_free_drug(y[0], KSS, 0.0)
         RC_blood_eff = 0.0
         V_blood      = 0.0
+
+    # ──────────────────────────────────────────────────────────────────────
+    # SOLUBLE TARGET — dedicated plasma-phase TMDD compartment
+    #
+    # Binding occurs directly in plasma (not ISF).
+    # R_sol is the FREE soluble receptor pool in plasma (nM).
+    # RC_sol = drug–receptor complex in plasma.
+    #
+    # SC and Bulk modes share the same R₀ (bulk plasma concentration)
+    # → RO curves are identical for SC and Bulk (biologically correct).
+    # ──────────────────────────────────────────────────────────────────────
+    RC_sol_sink = 0.0
+    if soluble_data is not None:
+        R_sol     = y[offset]
+        R_sol_pos = max(R_sol, 0.0)
+
+        denom_sol = KSS + Cc_free + 1e-15
+        RC_sol    = R_sol_pos * Cc_free / denom_sol
+        R_sol_f   = R_sol_pos * KSS    / denom_sol
+
+        dR_sol_dt   = soluble_data['ksyn'] - params.K_DEG * R_sol_f - params.K_INT * RC_sol
+        RC_sol_sink = params.K_INT * RC_sol   # drug consumed by soluble target
+
+        all_derivatives.append(np.array([dR_sol_dt]))
+        offset += 1
 
     Cc = Cc_free
 
@@ -216,8 +255,10 @@ def pbpk_qss_ode(t, y, params, system_data, blood_data=None):
 
         # ── Lymph drainage: target-type dependent ─────────────────────
         # Membrane target: only free Cisf drains (drug-RC anchored to cell).
-        # Soluble target:  total Ctot_isf drains (drug-RC free in ISF).
-        if soluble:
+        # Soluble target (ISF):  total Ctot_isf drains (drug-RC free in ISF).
+        # Note: primary soluble TMDD is now in plasma (soluble_data block above).
+        #       Tissue ISF still uses membrane-style drain for any residual.
+        if soluble_data is not None:
             Jlymph = L_lymph * Ctot_isf
         else:
             Jlymph = L_lymph * Cisf
@@ -247,12 +288,14 @@ def pbpk_qss_ode(t, y, params, system_data, blood_data=None):
 
     # ──────────────────────────────────────────────────────────────────────
     # CENTRAL ODE
+    # RC_sol_sink: drug consumed by plasma-phase soluble target internalization
     # ──────────────────────────────────────────────────────────────────────
     dCtot_central_dt = (
         venous_return
         + lymph_return
         - (params.CL_0 / params.V_CENTRAL) * Cc_free
         - params.K_INT * RC_blood_eff * V_blood / params.V_CENTRAL
+        - RC_sol_sink   # soluble target plasma TMDD sink
     )
 
     return np.concatenate([[dCtot_central_dt], *all_derivatives])

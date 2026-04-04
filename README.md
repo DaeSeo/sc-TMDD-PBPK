@@ -120,6 +120,21 @@ python bayesian_pipeline.py --target EGFR \
 | `volume_fraction` | Protein mass-weighted cell-type fraction |
 | `converged` | MCMC convergence flag (R-hat < 1.01, ESS ≥ 400, 0 divergences) |
 
+#### PaxDb Tissue Column Mapping
+
+`bayesian_pipeline.py` maps PaxDb wide-format columns to canonical tissue names used throughout the pipeline:
+
+| PaxDb Column | Canonical Name |
+|---|---|
+| `abundance_LUNG` | lung |
+| `abundance_KIDNEY` | kidney |
+| `abundance_PLASMA` | plasma |
+| `abundance_SKIN` | skin |
+| `abundance_BRAIN` | brain |
+| `abundance_HEART` | heart |
+| `abundance_LIVER` | liver |
+| `abundance_PBMC` | blood |
+
 ---
 
 ### Step 2 — PBPK Simulation (`run_simulation.py`)
@@ -304,6 +319,7 @@ The Gibiansky total-drug QSS formulation is used for numerical robustness, with 
 
 - **Solver:** SciPy `Radau` (implicit Runge-Kutta order 5), `rtol = atol = 1e-8`
 - **Dual-mode:** Runs SC and bulk parameterisations in a single call; output CSV contains a `mode` column (`single_cell` / `bulk`)
+- **Soluble target auto-detection:** Cell types named `soluble_*` in the blood tissue are automatically routed to a dedicated plasma-phase TMDD compartment. Both SC and Bulk modes use the same R₀ (bulk plasma concentration) for these entries, ensuring identical RO curves — biologically correct since soluble receptors are a plasma protein pool, not cell-type specific. No CLI flag required.
 - **Multi-dose:** Event-driven dosing via `solve_ivp` dense output and restart at each dose event
 - **Output:** Time-series flattened to long format — one row per (time, tissue, cell_type, mode)
 
@@ -395,6 +411,7 @@ Tissue-specific ρ values are derived from published tissue protein density meas
 - **Architecture** — Parallel organ layout (7 solid tissues + Rest-of-body + Blood), after Shah & Betts (2012)
 - **Vascular–ISF transport** — Simplified two-pore theory: convection (reflection coefficient σ), passive diffusion, and lymphatic drainage
 - **TMDD** — Gibiansky QSS total-drug formulation (Gibiansky et al. 2008); rationalised quadratic ensures numerical stability at near-saturation receptor occupancy
+- **Soluble target handling** — Cell types prefixed `soluble_*` are separated from membrane-bound blood cell entries and assigned to a dedicated plasma-phase TMDD compartment. Binding occurs directly in plasma (not ISF); both SC and Bulk modes use identical R₀ = bulk plasma concentration, so SC and Bulk receptor occupancy curves are equivalent for soluble targets by construction. Lymph drainage in solid-organ ISF switches to total drug (`C_tot,isf`) when a soluble target is detected.
 - **Solver** — SciPy `Radau` (implicit RK5), `rtol = atol = 1e-8`, well-suited for stiff TMDD ODE systems
 
 ---
