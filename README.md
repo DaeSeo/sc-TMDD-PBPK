@@ -1,4 +1,4 @@
-# Single-Cell Resolution PBPK Platform
+# sc-TMDD-PBPK
 
 A computational platform for **single-cell resolved Physiologically Based Pharmacokinetic (PBPK)** modelling with **target-mediated drug disposition (TMDD)** de-risking. The platform estimates cell-type-specific receptor concentrations (nM) by integrating single-cell RNA-seq data with bulk tissue proteomics through joint cross-tissue Bayesian MCMC inference, then simulates per-cell-type drug–target engagement dynamics across human tissues — and generates publication-quality figures.
 
@@ -10,9 +10,9 @@ A computational platform for **single-cell resolved Physiologically Based Pharma
 - [Folder Structure](#folder-structure)
 - [Installation](#installation)
 - [Workflow](#workflow)
-  - [Step 1 — Bayesian Data Pipeline](#step-1--bayesian-data-pipeline-mainpy)
-  - [Step 2 — PBPK Simulation](#step-2--pbpk-simulation-main_pbpkpy)
-  - [Step 3 — Visualisation](#step-3--visualisation-visualisationpy)
+  - [Step 1 — Bayesian Data Pipeline](#step-1--bayesian-data-pipeline-bayesian_pipelinepy)
+  - [Step 2 — PBPK Simulation](#step-2--pbpk-simulation-run_simulationpy)
+  - [Step 3 — Figure Generation](#step-3--figure-generation-generate_figurespy)
 - [Key Modules](#key-modules)
 - [Output Columns](#output-columns)
 - [Figures Generated](#figures-generated)
@@ -35,7 +35,7 @@ Conventional PBPK–TMDD models parameterise receptor concentrations using bulk 
 ## Folder Structure
 
 ```
-Single_Cell_Res_PBPK/
+sc-TMDD-PBPK/
 ├── inference/
 │   ├── __init__.py
 │   ├── bayesian_ppm.py         # Joint cross-tissue Bayesian MCMC (PyMC/NUTS)
@@ -49,11 +49,11 @@ Single_Cell_Res_PBPK/
 ├── HPA_Single_Cell.parquet     # Pre-downloaded HPA single-cell RNA-seq data
 ├── PaxDb_data.parquet          # Pre-downloaded PaxDb bulk tissue proteomics
 ├── LICENSE
-├── main.py                     # Step 1: Data loading, merging & Bayesian inference
-├── main_pbpk.py                # Step 2: PBPK simulation (single-cell + bulk)
+├── bayesian_pipeline.py                     # Step 1: Data loading, merging & Bayesian inference
+├── run_simulation.py                # Step 2: PBPK simulation (single-cell + bulk)
 ├── requirements.txt
 ├── README.md
-└── visualisation.py            # Step 3: High-resolution figure generation
+└── generate_figures.py            # Step 3: High-resolution figure generation
 ```
 
 ---
@@ -63,8 +63,8 @@ Single_Cell_Res_PBPK/
 Requires **Python 3.11+**. A virtual environment is strongly recommended.
 
 ```bash
-git clone https://github.com/[YOUR_USERNAME]/Single_Cell_Res_PBPK.git
-cd Single_Cell_Res_PBPK
+git clone https://github.com/[YOUR_USERNAME]/sc-TMDD-PBPK.git
+cd sc-TMDD-PBPK
 
 python -m venv .venv
 source .venv/bin/activate        # Linux / macOS
@@ -88,22 +88,22 @@ pip install -r requirements.txt
 
 ## Workflow
 
-### Step 1 — Bayesian Data Pipeline (`main.py`)
+### Step 1 — Bayesian Data Pipeline (`bayesian_pipeline.py`)
 
 Loads HPA single-cell and PaxDb bulk proteomics parquet files, merges them on tissue name, and runs joint cross-tissue MCMC inference to produce cell-type-resolved receptor concentrations.
 
 ```bash
 # EGFR with default parquet paths
-python main.py --target EGFR
+python bayesian_pipeline.py --target EGFR
 
 # ERBB2 with custom MCMC settings
-python main.py --target ERBB2 --draws 3000 --tune 3000
+python bayesian_pipeline.py --target ERBB2 --draws 3000 --tune 3000
 
 # Merge only — skip MCMC (useful for debugging)
-python main.py --target EGFR --skip-inference
+python bayesian_pipeline.py --target EGFR --skip-inference
 
 # Custom parquet paths
-python main.py --target EGFR \
+python bayesian_pipeline.py --target EGFR \
     --hpa-path data/HPA_Single_Cell.parquet \
     --pax-path data/PaxDb_data.parquet
 ```
@@ -120,24 +120,9 @@ python main.py --target EGFR \
 | `volume_fraction` | Protein mass-weighted cell-type fraction |
 | `converged` | MCMC convergence flag (R-hat < 1.01, ESS ≥ 400, 0 divergences) |
 
-#### PaxDb Tissue Column Mapping
-
-`main.py` maps PaxDb wide-format columns to canonical tissue names used throughout the pipeline:
-
-| PaxDb Column | Canonical Name |
-|---|---|
-| `abundance_LUNG` | lung |
-| `abundance_KIDNEY` | kidney |
-| `abundance_PLASMA` | plasma |
-| `abundance_SKIN` | skin |
-| `abundance_BRAIN` | brain |
-| `abundance_HEART` | heart |
-| `abundance_LIVER` | liver |
-| `abundance_PBMC` | blood |
-
 ---
 
-### Step 2 — PBPK Simulation (`main_pbpk.py`)
+### Step 2 — PBPK Simulation (`run_simulation.py`)
 
 Runs the whole-body PBPK model with both single-cell and bulk receptor parameterisations in parallel.
 
@@ -145,13 +130,13 @@ Runs the whole-body PBPK model with both single-cell and bulk receptor parameter
 
 ```bash
 # Default: cetuximab 400 mg/m², EGFR, 120 days
-python main_pbpk.py
+python run_simulation.py
 
 # Custom drug / target / dose
-python main_pbpk.py --Drug cetuximab --Target EGFR --Dose 100 --Days 120
+python run_simulation.py --Drug cetuximab --Target EGFR --Dose 100 --Days 120
 
 # Clinical dosing regimen
-python main_pbpk.py --Drug cetuximab --Target EGFR --Regimen loading_q1w --Days 84
+python run_simulation.py --Drug cetuximab --Target EGFR --Regimen loading_q1w --Days 84
 ```
 
 #### Multi-dose mode
@@ -159,12 +144,12 @@ python main_pbpk.py --Drug cetuximab --Target EGFR --Regimen loading_q1w --Days 
 Each dose is simulated as an **independent single-dose experiment** (not repeated dosing).
 
 ```bash
-python main_pbpk.py --multi --doses 0.1,1,10,100 --Drug cetuximab --Target EGFR --Days 120
+python run_simulation.py --multi --doses 0.1,1,10,100 --Drug cetuximab --Target EGFR --Days 120
 ```
 
 **Output:** `data/pbpk_<target>_<drug>_<dose>mg.csv` per dose — time-series of plasma concentration, tissue ISF concentration, free receptor [R], bound complex [RC], receptor occupancy (%), and TMDD index for every cell type in every tissue.
 
-#### CLI Reference (`main_pbpk.py`)
+#### CLI Reference (`run_simulation.py`)
 
 | Argument | Default | Description |
 |----------|---------|-------------|
@@ -179,7 +164,7 @@ python main_pbpk.py --multi --doses 0.1,1,10,100 --Drug cetuximab --Target EGFR 
 
 ---
 
-### Step 3 — Visualisation (`visualisation.py`)
+### Step 3 — Figure Generation (`generate_figures.py`)
 
 Generates publication-quality figures (300 dpi, linear y-axes, 40-colour purple ramp palette).
 
@@ -187,20 +172,20 @@ Generates publication-quality figures (300 dpi, linear y-axes, 40-colour purple 
 
 ```bash
 # All tissues
-python visualisation.py --Target EGFR --Drug Cetuximab --Dose 400 --Tissue all
+python generate_figures.py --Target EGFR --Drug Cetuximab --Dose 400 --Tissue all
 
 # Specific tissue
-python visualisation.py --Target EGFR --Drug Cetuximab --Dose 400 --Tissue Liver
+python generate_figures.py --Target EGFR --Drug Cetuximab --Dose 400 --Tissue Liver
 ```
 
 #### Multi-dose comparison mode
 
 ```bash
-python visualisation.py --Target EGFR --Drug Cetuximab \
+python generate_figures.py --Target EGFR --Drug Cetuximab \
     --multi --doses 0.1,1,10,100 --Tissue all
 ```
 
-#### CLI Reference (`visualisation.py`)
+#### CLI Reference (`generate_figures.py`)
 
 | Argument | Default | Description |
 |----------|---------|-------------|
